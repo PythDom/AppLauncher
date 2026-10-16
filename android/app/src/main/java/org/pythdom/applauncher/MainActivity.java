@@ -407,7 +407,7 @@ public class MainActivity extends Activity {
                     c = (HttpURLConnection) new URL(url).openConnection();
                     c.setRequestMethod("POST");
                     c.setConnectTimeout(15000);
-                    c.setReadTimeout(120000);
+                    c.setReadTimeout(300000);
                     c.setDoOutput(true);
                     JSONObject h = new JSONObject(headersJson);
                     Iterator<String> keys = h.keys();

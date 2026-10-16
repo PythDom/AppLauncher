@@ -723,6 +723,7 @@ async function aiAsk(system, user, maxTokens) {
 }
 
 function parseJson(t) {
+    t = String(t).replace(/<think>[\s\S]*?<\/think>/gi, "");
     const s = t.indexOf("{"), e = t.lastIndexOf("}");
     if (s < 0 || e < s) throw new Error("No JSON in the reply");
     return JSON.parse(t.slice(s, e + 1));
@@ -744,52 +745,136 @@ async function aiChunk(chunk) {
     const user = "Existing categories: " + (existing.length ? existing.join(", ") : "none") +
         "\nLanguage for new category names: " + (state.ai.lang || "English") + "\nAPPS:\n" + lines.join("\n");
     let text = await aiAsk(SYSTEM_PROMPT, user, 4096);
+    lastAiReply = text;
     try { return parseJson(text); }
     catch (e) {
         text = await aiAsk(SYSTEM_PROMPT, user + "\n\nYour previous reply was not valid JSON. Reply with the JSON object only.", 4096);
+        lastAiReply = text;
         return parseJson(text);
     }
 }
 
+let lastAiReply = "";
+
 function safeHost(u) { try { return new URL(u).hostname; } catch (e) { return u; } }
 
+// Models don't always follow the requested shape, so accept the common variants:
+//   {"apps":{"pkg":{"c":"Cat","rare":false}}}   (asked for)
+//   {"apps":{"pkg":"Cat"}}  /  {"apps":[{"key":"pkg","c":"Cat"}]}
+//   {"Cat":["pkg","Label",...]}  /  {"categories":{"Cat":[...]}}
+function normaliseAi(res) {
+    const rows = [];
+    const add = (key, cat, rare) => { if (key && cat) rows.push({ key: String(key), cat: String(cat), rare: !!rare }); };
+    const fromList = (cat, list) => {
+        if (!Array.isArray(list)) return false;
+        list.forEach((x) => add(typeof x === "string" ? x : x && (x.key || x.package || x.pkg || x.label || x.name), cat, x && x.rare));
+        return true;
+    };
+    const a = res.apps;
+    if (Array.isArray(a)) {
+        a.forEach((e) => e && add(e.key || e.package || e.pkg || e.app || e.id || e.label || e.name,
+            e.c || e.category || e.cat, e.rare));
+    } else if (a && typeof a === "object") {
+        for (const [k, v] of Object.entries(a)) {
+            if (typeof v === "string") add(k, v, false);
+            else if (Array.isArray(v)) fromList(k, v);
+            else if (v) add(k, v.c || v.category || v.cat, v.rare);
+        }
+    }
+    if (!rows.length) {
+        const groups = res.categories && !Array.isArray(res.categories) && typeof res.categories === "object" ? res.categories : res;
+        for (const [cat, list] of Object.entries(groups)) fromList(cat, list);
+    }
+    return rows;
+}
+
 function applyAi(res, chunk, opts, created) {
-    const byKey = new Map(chunk.map((i) => [keyOf(i), i]));
-    let n = 0;
-    for (const [k, v] of Object.entries(res.apps || {})) {
-        const it = byKey.get(k);
+    const byKey = new Map(), byLabel = new Map();
+    chunk.forEach((i) => {
+        byKey.set(keyOf(i).toLowerCase(), i);
+        const l = i.label.toLowerCase();
+        if (!byLabel.has(l)) byLabel.set(l, i);
+    });
+    const rows = normaliseAi(res);
+    const matched = new Set();
+    for (const r of rows) {
+        const k = r.key.split("|")[0].trim().toLowerCase();
+        const it = byKey.get(k) || byLabel.get(k) || byLabel.get(r.key.split("|").pop().trim().toLowerCase());
         if (!it) continue;
-        const name = typeof v === "string" ? v : v && v.c;
-        const cat = ensureCat(name, created);
+        const cat = ensureCat(r.cat, created);
         if (!cat) continue;
         it.catId = cat.id;
-        if (opts.moveRare && v && v.rare) it.page = 1;
-        n++;
+        if (opts.moveRare && r.rare) it.page = 1;
+        matched.add(it.id);
     }
-    return n;
+    return { applied: matched.size, replied: rows.length };
+}
+
+function progressCard(title) {
+    const w = document.createElement("div");
+    const h = document.createElement("h3");
+    h.textContent = title;
+    const s = document.createElement("div");
+    s.className = "note";
+    const row = document.createElement("div");
+    row.className = "row";
+    const b = document.createElement("button");
+    b.textContent = "Hide";
+    b.onclick = closeOverlay;
+    row.appendChild(b);
+    w.append(h, s, row);
+    showCard(w);
+    return (t) => { s.textContent = t; };
+}
+
+function resultCard(title, summary, details) {
+    form(title, [{ id: "d", label: summary, type: "textarea", rows: 9, value: details || "" }], "Close", () => {}, [
+        { label: "Copy", run: (v, say) => { try { A.copyText(summary + "\n\n" + v.d); say("Copied"); } catch (e) { say("Copy failed"); } } }
+    ]);
 }
 
 async function aiSort(opts) {
     if (aiBusy) return;
     aiBusy = true;
+    const say = progressCard("AI is sorting");
+    const t0 = Date.now();
+    let stage = "Starting…";
+    const tick = setInterval(() => say(stage + "\n" + Math.round((Date.now() - t0) / 1000) + " s elapsed" +
+        "\n(Slow home servers can take a minute or more per batch.)"), 1000);
+    say(stage);
+    const BATCH = 40;
     try {
         const targets = state.items.filter((i) => !i.hidden && (opts.scope === "all" || !catOf(i)));
-        if (!targets.length) { toast("Nothing to sort"); return; }
+        if (!targets.length) { clearInterval(tick); resultCard("Nothing to sort", "Every item already has a category.", ""); return; }
         const chunks = [];
-        for (let k = 0; k < targets.length; k += 70) chunks.push(targets.slice(k, k + 70));
+        for (let k = 0; k < targets.length; k += BATCH) chunks.push(targets.slice(k, k + BATCH));
         const created = new Set();
-        let done = 0;
+        let done = 0, replied = 0;
         for (let n = 0; n < chunks.length; n++) {
-            toast("AI is sorting… " + (n + 1) + "/" + chunks.length, 90000);
+            stage = "Batch " + (n + 1) + " of " + chunks.length + " — waiting for the AI (" + chunks[n].length + " items)…";
+            lastAiReply = "";
             const res = await aiChunk(chunks[n]);
-            done += applyAi(res, chunks[n], opts, created);
+            const r = applyAi(res, chunks[n], opts, created);
+            done += r.applied;
+            replied += r.replied;
             save();
             render();
         }
-        toast("AI sorted " + done + " of " + targets.length + " items (" + created.size + " new categories)", 5000);
+        clearInterval(tick);
+        const summary = "Sorted " + done + " of " + targets.length + " items into " + (created.size ? created.size + " new categories (" + [...created].join(", ") + ")" : "existing categories") + ".";
+        if (done === 0) {
+            resultCard("AI answered, but nothing matched",
+                "The reply was received (" + replied + " entries) but none could be matched to your apps. This is the AI's reply — send it to me if it looks wrong:",
+                lastAiReply.slice(0, 3000));
+        } else {
+            closeOverlay();
+            toast(summary, 6000);
+        }
     } catch (e) {
-        toast("AI error: " + e.message, 7000);
+        clearInterval(tick);
+        resultCard("AI sorting failed", String(e.message || e), lastAiReply ? "Last reply from the AI:\n" + lastAiReply.slice(0, 3000) : "");
     } finally {
+        clearInterval(tick);
         aiBusy = false;
     }
 }
@@ -803,7 +888,7 @@ function aiDialog() {
             { value: "all", label: "Everything (re-sort)" }
         ] },
         { id: "moveRare", label: "Also move rarely needed apps to the second screen", type: "checkbox", value: false }
-    ], "Start", (v) => { aiSort({ scope: v.scope, moveRare: v.moveRare }); });
+    ], "Start", (v) => { setTimeout(() => aiSort({ scope: v.scope, moveRare: v.moveRare }), 0); });
 }
 
 function aiSettings() {

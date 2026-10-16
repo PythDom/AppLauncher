@@ -64,7 +64,20 @@
                     const b = JSON.parse(body);
                     const anthropic = /anthropic|mock-claude/.test(url);
                     const user = anthropic ? b.messages[0].content : b.messages[1].content;
-                    const text = user === "ping" ? '{"ok":true}' : fakeModel(user);
+                    if (/mock-fail/.test(url)) { window.__httpResult(id, 500, '{"error":"model overloaded"}'); return; }
+                    let text = user === "ping" ? '{"ok":true}' : fakeModel(user);
+                    if (user !== "ping") {
+                        const obj = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
+                        const lines = user.split("APPS:\n")[1].split("\n").map((l) => l.match(/^(\S+) \| (.*)$/)).filter(Boolean);
+                        if (/mock-garbage/.test(url)) text = "I'm sorry, I can't help with that.";
+                        else if (/mock-think/.test(url)) text = "<think>maybe {\"x\":1} first</think>" + JSON.stringify(obj);
+                        else if (/mock-array/.test(url)) text = JSON.stringify({ apps: lines.map((m) => ({ package: m[1], category: obj.apps[m[1]].c })) });
+                        else if (/mock-bycat/.test(url)) {
+                            const g = {};
+                            lines.forEach((m) => { (g[obj.apps[m[1]].c] = g[obj.apps[m[1]].c] || []).push(m[2]); });
+                            text = JSON.stringify(g);
+                        } else if (/mock-nomatch/.test(url)) text = JSON.stringify({ apps: { "no.such.pkg": { c: "X" } } });
+                    }
                     const payload = anthropic ? { content: [{ type: "text", text }] } : { choices: [{ message: { content: text } }] };
                     window.__httpResult(id, 200, JSON.stringify(payload));
                 } catch (e) {
