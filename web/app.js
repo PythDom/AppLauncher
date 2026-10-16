@@ -696,7 +696,10 @@ function endpoint(ai) {
     if (ai.provider === "anthropic") {
         return (ai.url || "https://api.anthropic.com").replace(/\/+$/, "") + "/v1/messages";
     }
-    return ai.url.replace(/\/+$/, "").replace(/\/v1$/, "") + "/v1/chat/completions";
+    const u = ai.url.trim().replace(/\/+$/, "");
+    if (/\/chat\/completions$/.test(u)) return u;        // full endpoint given
+    if (/\/api$/.test(u)) return u + "/chat/completions"; // Open WebUI: http://host:3000/api
+    return u.replace(/\/v1$/, "") + "/v1/chat/completions"; // Ollama, LM Studio, llama.cpp...
 }
 
 async function aiAsk(system, user, maxTokens) {
@@ -708,8 +711,10 @@ async function aiAsk(system, user, maxTokens) {
     } else {
         headers = { "content-type": "application/json" };
         if (ai.key) headers.authorization = "Bearer " + ai.key;
+        // Qwen3 "thinks" first by default and can use up the whole budget; /no_think turns that off.
+        const msg = /qwen3/i.test(ai.model) ? user + " /no_think" : user;
         body = { model: ai.model, temperature: 0.2, max_tokens: maxTokens || 4096,
-                 messages: [{ role: "system", content: system }, { role: "user", content: user }] };
+                 messages: [{ role: "system", content: system }, { role: "user", content: msg }] };
     }
     const r = await httpPost(endpoint(ai), headers, JSON.stringify(body));
     lastRaw = String(r.text);
@@ -938,8 +943,8 @@ function aiSettings() {
             { value: "anthropic", label: "Claude API (Anthropic)" },
             { value: "openai", label: "OpenAI-compatible server (Ollama, LM Studio…)" }
         ] },
-        { id: "url", label: "Server URL (blank = official Claude API)", type: "url", value: a.url, placeholder: "http://192.168.x.x:11434" },
-        { id: "key", label: "API key (optional for local servers)", type: "password", value: a.key },
+        { id: "url", label: "Server URL (blank = official Claude API). Open WebUI: http://host:3000/api — Ollama: http://host:11434", type: "url", value: a.url, placeholder: "http://192.168.129.34:3000/api" },
+        { id: "key", label: "API key (Open WebUI: Settings → Account → API keys; Ollama: none)", type: "password", value: a.key },
         { id: "model", label: "Model", value: a.model, placeholder: "claude-haiku-4-5-20251001 or llama3.1" },
         { id: "lang", label: "Language for category names", value: a.lang || "English" }
     ], "Save", (v) => {
