@@ -1,0 +1,62 @@
+name: Build Android launcher
+
+on:
+  push:
+    paths:
+      - 'web/**'
+      - 'android/**'
+      - '!android/launcher.keystore'
+      - '.github/workflows/android.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.5'
+
+      # One-time: create a signing key and keep it in the repo so every later
+      # build is signed with the same key (lets the APK update in place).
+      - name: Ensure signing key
+        working-directory: android
+        run: |
+          if [ ! -f launcher.keystore ]; then
+            keytool -genkeypair -keystore launcher.keystore -storetype PKCS12 \
+              -storepass launcher -keypass launcher -alias launcher \
+              -keyalg RSA -keysize 2048 -validity 36500 -dname "CN=PythDom AppLauncher"
+            git config user.name "github-actions"
+            git config user.email "actions@users.noreply.github.com"
+            git add launcher.keystore
+            git commit -m "Add APK signing key"
+            git push
+          fi
+
+      - name: Build APK
+        working-directory: android
+        run: gradle --no-daemon assembleRelease
+
+      - name: Publish APK as a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp android/app/build/outputs/apk/release/app-release.apk applauncher.apk
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest applauncher.apk \
+            --title "AppLauncher APK (latest)" \
+            --notes "Sideload this APK on your Android phone."
