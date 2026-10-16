@@ -35,7 +35,7 @@
     ];
 
     function fakeModel(user) {
-        const lines = user.split("APPS:\n")[1].split("\n");
+        const lines = user.split(/(?:APPS|ITEMS):\n/)[1].split("\n");
         const out = { categories: [], apps: {} };
         for (const line of lines) {
             const m = line.match(/^(\S+) \| (.*)$/);
@@ -64,13 +64,16 @@
                     const b = JSON.parse(body);
                     const anthropic = /anthropic|mock-claude/.test(url);
                     const user = anthropic ? b.messages[0].content : b.messages[1].content;
+                    if (/mock-empty/.test(url)) { window.__httpResult(id, 200, JSON.stringify({ choices: [{ message: { content: "" } }] })); return; }
+                    if (/mock-reason/.test(url)) { window.__httpResult(id, 200, JSON.stringify({ choices: [{ message: { content: "", reasoning: "Let me think..." } }] })); return; }
                     if (/mock-fail/.test(url)) { window.__httpResult(id, 500, '{"error":"model overloaded"}'); return; }
                     let text = user === "ping" ? '{"ok":true}' : fakeModel(user);
                     if (user !== "ping") {
                         const obj = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
-                        const lines = user.split("APPS:\n")[1].split("\n").map((l) => l.match(/^(\S+) \| (.*)$/)).filter(Boolean);
+                        const lines = user.split(/(?:APPS|ITEMS):\n/)[1].split("\n").map((l) => l.match(/^(\S+) \| (.*)$/)).filter(Boolean);
                         if (/mock-garbage/.test(url)) text = "I'm sorry, I can't help with that.";
                         else if (/mock-think/.test(url)) text = "<think>maybe {\"x\":1} first</think>" + JSON.stringify(obj);
+                        else if (/mock-lines/.test(url)) text = "Sure! Here is the sorting:\n```\n" + lines.map((m, n) => (n % 2 ? "- " : "") + m[1] + " | " + obj.apps[m[1]].c + " | " + (obj.apps[m[1]].rare ? "rare" : "common")).join("\n") + "\n```\nHope that helps!";
                         else if (/mock-array/.test(url)) text = JSON.stringify({ apps: lines.map((m) => ({ package: m[1], category: obj.apps[m[1]].c })) });
                         else if (/mock-bycat/.test(url)) {
                             const g = {};

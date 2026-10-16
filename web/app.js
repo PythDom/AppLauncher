@@ -708,19 +708,32 @@ async function aiAsk(system, user, maxTokens) {
     } else {
         headers = { "content-type": "application/json" };
         if (ai.key) headers.authorization = "Bearer " + ai.key;
-        body = { model: ai.model, temperature: 0.2, messages: [{ role: "system", content: system }, { role: "user", content: user }] };
+        body = { model: ai.model, temperature: 0.2, max_tokens: maxTokens || 4096,
+                 messages: [{ role: "system", content: system }, { role: "user", content: user }] };
     }
     const r = await httpPost(endpoint(ai), headers, JSON.stringify(body));
+    lastRaw = String(r.text);
     if (r.status < 200 || r.status >= 300) {
         throw new Error((r.status || "network") + " " + String(r.text).slice(0, 160));
     }
     let data;
-    try { data = JSON.parse(r.text); } catch (e) { throw new Error("Server did not return JSON"); }
+    try { data = JSON.parse(r.text); } catch (e) { throw new Error("The server did not return JSON (is the URL right?)"); }
+    let text = "";
     if (ai.provider === "anthropic") {
-        return (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("");
+        text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("");
+    } else {
+        const m = data.choices && data.choices[0] && data.choices[0].message;
+        text = (m && m.content) || "";
+        if (!text && m && (m.reasoning_content || m.reasoning)) {
+            throw new Error("The model only produced its reasoning and no answer. It is probably a \"thinking\" model — pick a non-thinking model in AI server settings.");
+        }
     }
-    return data.choices && data.choices[0] && data.choices[0].message ? data.choices[0].message.content : "";
+    if (!String(text).trim()) throw new Error("The model returned an empty reply (check the model name).");
+    return text;
 }
+
+let lastRaw = "";
+let lastAiReply = "";
 
 function parseJson(t) {
     t = String(t).replace(/<think>[\s\S]*?<\/think>/gi, "");
@@ -729,13 +742,39 @@ function parseJson(t) {
     return JSON.parse(t.slice(s, e + 1));
 }
 
+// Plain lines survive weak/local models far better than JSON:  key | Category | rare
+function parseLines(t) {
+    t = String(t).replace(/<think>[\s\S]*?<\/think>/gi, "").replace(/```[a-z]*/gi, "");
+    const rows = [];
+    for (let line of t.split(/\r?\n/)) {
+        line = line.trim().replace(/^([-*•]|\d+[.)])\s+/, "");
+        if (!line) continue;
+        let parts = line.includes("|") ? line.split("|") : line.split(/\s*(?:=>|->|→|:)\s+/);
+        parts = parts.map((p) => p.trim().replace(/^["'`*]+|["'`*]+$/g, ""));
+        if (parts.length < 2 || !parts[0] || !parts[1]) continue;
+        if (/^key$/i.test(parts[0]) || /^category$/i.test(parts[1])) continue;
+        rows.push({ key: parts[0], cat: parts[1], rare: /rare/i.test(parts[2] || "") && !/not rare|common/i.test(parts[2] || "") });
+    }
+    return rows;
+}
+
+function toRows(text) {
+    const rows = parseLines(text);
+    if (rows.length) return rows;
+    let r = [];
+    try { r = normaliseAi(parseJson(text)); } catch (e) { /* not JSON either */ }
+    if (!r.length) throw new Error("The model's reply wasn't in the expected format (lines like  package | Category | common).");
+    return r;
+}
+
 const SYSTEM_PROMPT =
-    "You organise the home screen of an Android phone. You receive installed apps and shortcuts as lines 'key | label'. " +
-    "Put every line in exactly one category. Prefer the existing categories when they fit; otherwise create a new short category " +
+    "You organise the home screen of an Android phone. You receive installed apps and shortcuts, one per line as 'key | label'. " +
+    "Put every item in exactly one category. Prefer the existing categories when they fit; otherwise create a new short category " +
     "(1-2 words, Title Case). Keep the total number of categories small (about 6 to 12). " +
-    "Also set \"rare\": true for items a typical person rarely opens (system utilities, carrier or manufacturer bloatware, setup helpers). " +
-    "Reply with ONLY a JSON object and no other text, exactly in this shape: " +
-    "{\"categories\":[\"Name\"],\"apps\":{\"key\":{\"c\":\"Name\",\"rare\":false}}}";
+    "Mark an item 'rare' if a typical person rarely opens it (system utilities, carrier or manufacturer bloatware, setup helpers), otherwise 'common'. " +
+    "Reply with plain text ONLY: exactly one line per input item, in the form  key | Category | common  " +
+    "(copy the key exactly as given). Example line: com.example.mail | Communication | common. " +
+    "No headings, no explanations, no numbering, no markdown, no JSON.";
 
 function keyOf(i) { return i.type === "app" ? i.pkg : i.id; }
 
@@ -743,18 +782,16 @@ async function aiChunk(chunk) {
     const existing = state.categories.map((c) => c.name);
     const lines = chunk.map((i) => keyOf(i) + " | " + i.label + (i.type === "link" ? " (web shortcut: " + safeHost(i.url) + ")" : ""));
     const user = "Existing categories: " + (existing.length ? existing.join(", ") : "none") +
-        "\nLanguage for new category names: " + (state.ai.lang || "English") + "\nAPPS:\n" + lines.join("\n");
+        "\nLanguage for new category names: " + (state.ai.lang || "English") + "\nITEMS:\n" + lines.join("\n");
     let text = await aiAsk(SYSTEM_PROMPT, user, 4096);
     lastAiReply = text;
-    try { return parseJson(text); }
+    try { return toRows(text); }
     catch (e) {
-        text = await aiAsk(SYSTEM_PROMPT, user + "\n\nYour previous reply was not valid JSON. Reply with the JSON object only.", 4096);
+        text = await aiAsk(SYSTEM_PROMPT, user + "\n\nYour previous reply could not be read. Reply ONLY with lines in the form  key | Category | common", 4096);
         lastAiReply = text;
-        return parseJson(text);
+        return toRows(text);
     }
 }
-
-let lastAiReply = "";
 
 function safeHost(u) { try { return new URL(u).hostname; } catch (e) { return u; } }
 
@@ -795,7 +832,7 @@ function applyAi(res, chunk, opts, created) {
         const l = i.label.toLowerCase();
         if (!byLabel.has(l)) byLabel.set(l, i);
     });
-    const rows = normaliseAi(res);
+    const rows = Array.isArray(res) ? res : normaliseAi(res);
     const matched = new Set();
     for (const r of rows) {
         const k = r.key.split("|")[0].trim().toLowerCase();
@@ -853,6 +890,7 @@ async function aiSort(opts) {
         for (let n = 0; n < chunks.length; n++) {
             stage = "Batch " + (n + 1) + " of " + chunks.length + " — waiting for the AI (" + chunks[n].length + " items)…";
             lastAiReply = "";
+            lastRaw = "";
             const res = await aiChunk(chunks[n]);
             const r = applyAi(res, chunks[n], opts, created);
             done += r.applied;
@@ -872,7 +910,9 @@ async function aiSort(opts) {
         }
     } catch (e) {
         clearInterval(tick);
-        resultCard("AI sorting failed", String(e.message || e), lastAiReply ? "Last reply from the AI:\n" + lastAiReply.slice(0, 3000) : "");
+        resultCard("AI sorting failed", String(e.message || e),
+            lastAiReply ? "Last reply from the AI:\n" + lastAiReply.slice(0, 3000)
+                : lastRaw ? "Raw response from the server:\n" + lastRaw.slice(0, 1500) : "");
     } finally {
         clearInterval(tick);
         aiBusy = false;
