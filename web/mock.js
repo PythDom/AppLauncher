@@ -63,7 +63,11 @@
                 try {
                     const b = JSON.parse(body);
                     const anthropic = /anthropic|mock-claude/.test(url);
-                    const user = anthropic ? b.messages[0].content : b.messages[1].content;
+                    const ollama = /\/api\/chat$/.test(url);
+                    window.__lastBody = b;
+                    if (ollama && /mock-nothink-unsupported/.test(url) && "think" in b) { window.__httpResult(id, 400, '{"error":"think not supported"}'); return; }
+                    if (ollama && /mock-thinks/.test(url) && b.think !== false) { window.__httpResult(id, 200, JSON.stringify({ message: { content: "", thinking: "hmm" } })); return; }
+                    const user = anthropic ? b.messages[0].content : b.messages[1].content.replace(/ \/no_think$/, "");
                     if (/mock-empty/.test(url)) { window.__httpResult(id, 200, JSON.stringify({ choices: [{ message: { content: "" } }] })); return; }
                     if (/mock-reason/.test(url)) { window.__httpResult(id, 200, JSON.stringify({ choices: [{ message: { content: "", reasoning: "Let me think..." } }] })); return; }
                     if (/mock-fail/.test(url)) { window.__httpResult(id, 500, '{"error":"model overloaded"}'); return; }
@@ -81,7 +85,8 @@
                             text = JSON.stringify(g);
                         } else if (/mock-nomatch/.test(url)) text = JSON.stringify({ apps: { "no.such.pkg": { c: "X" } } });
                     }
-                    const payload = anthropic ? { content: [{ type: "text", text }] } : { choices: [{ message: { content: text } }] };
+                    const payload = anthropic ? { content: [{ type: "text", text }] }
+                        : ollama ? { message: { content: text } } : { choices: [{ message: { content: text } }] };
                     window.__httpResult(id, 200, JSON.stringify(payload));
                 } catch (e) {
                     window.__httpResult(id, 500, String(e));

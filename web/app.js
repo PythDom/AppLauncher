@@ -692,7 +692,14 @@ function httpPost(url, headers, body) {
     });
 }
 
+// A name without a tag means ":latest"; Open WebUI's /ollama proxy only knows the full name.
+function ollamaModel(name) {
+    const n = (name || "").trim();
+    return n && !n.includes(":") ? n + ":latest" : n;
+}
+
 function endpoint(ai) {
+    if (ai.provider === "ollama") return ai.url.trim().replace(/\/+$/, "") + "/api/chat";
     if (ai.provider === "anthropic") {
         return (ai.url || "https://api.anthropic.com").replace(/\/+$/, "") + "/v1/messages";
     }
@@ -702,39 +709,77 @@ function endpoint(ai) {
     return u.replace(/\/v1$/, "") + "/v1/chat/completions"; // Ollama, LM Studio, llama.cpp...
 }
 
-async function aiAsk(system, user, maxTokens) {
+const THINKING_ERROR = "The model only produced its reasoning and no answer (a \"thinking\" model, even with thinking switched off). " +
+    "Use a non-thinking model instead, e.g. in Ollama `qwen3:4b-instruct`, `llama3.2` or `gemma3`, or turn thinking off for this model in Open WebUI " +
+    "(Admin → Settings → Models → qwen3:4b → Advanced Params).";
+
+// One request. Returns {text, thinkingOnly}; throws on HTTP/format errors.
+async function aiOnce(system, user, tokens, extra) {
     const ai = state.ai;
     let headers, body;
     if (ai.provider === "anthropic") {
         headers = { "content-type": "application/json", "x-api-key": ai.key, "anthropic-version": "2023-06-01" };
-        body = { model: ai.model, max_tokens: maxTokens || 4096, system, messages: [{ role: "user", content: user }] };
+        body = { model: ai.model, max_tokens: tokens, system, messages: [{ role: "user", content: user }] };
+    } else if (ai.provider === "ollama") {
+        headers = { "content-type": "application/json" };
+        if (ai.key) headers.authorization = "Bearer " + ai.key;
+        const msg = /qwen3/i.test(ai.model) ? user + " /no_think" : user;
+        body = Object.assign({ model: ollamaModel(ai.model), stream: false,
+                 options: { temperature: 0.2, num_predict: tokens },
+                 messages: [{ role: "system", content: system }, { role: "user", content: msg }] }, extra || {});
     } else {
         headers = { "content-type": "application/json" };
         if (ai.key) headers.authorization = "Bearer " + ai.key;
-        // Qwen3 "thinks" first by default and can use up the whole budget; /no_think turns that off.
+        // Qwen3 "thinks" first by default; /no_think is its soft switch to skip that.
         const msg = /qwen3/i.test(ai.model) ? user + " /no_think" : user;
-        body = { model: ai.model, temperature: 0.2, max_tokens: maxTokens || 4096,
-                 messages: [{ role: "system", content: system }, { role: "user", content: msg }] };
+        body = Object.assign({ model: ai.model, temperature: 0.2, max_tokens: tokens,
+                 messages: [{ role: "system", content: system }, { role: "user", content: msg }] }, extra || {});
     }
     const r = await httpPost(endpoint(ai), headers, JSON.stringify(body));
     lastRaw = String(r.text);
     if (r.status < 200 || r.status >= 300) {
-        throw new Error((r.status || "network") + " " + String(r.text).slice(0, 160));
+        const e = new Error((r.status || "network") + " " + String(r.text).slice(0, 160));
+        e.status = r.status;
+        throw e;
     }
     let data;
     try { data = JSON.parse(r.text); } catch (e) { throw new Error("The server did not return JSON (is the URL right?)"); }
-    let text = "";
+    let text = "", reasoning = false;
     if (ai.provider === "anthropic") {
         text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("");
+    } else if (ai.provider === "ollama") {
+        const m = data.message;
+        text = (m && m.content) || "";
+        reasoning = !!(m && (m.thinking || m.reasoning));
     } else {
         const m = data.choices && data.choices[0] && data.choices[0].message;
         text = (m && m.content) || "";
-        if (!text && m && (m.reasoning_content || m.reasoning)) {
-            throw new Error("The model only produced its reasoning and no answer. It is probably a \"thinking\" model — pick a non-thinking model in AI server settings.");
-        }
+        reasoning = !!(m && (m.reasoning_content || m.reasoning));
     }
-    if (!String(text).trim()) throw new Error("The model returned an empty reply (check the model name).");
-    return text;
+    if (/<think>/i.test(text) && !String(text).replace(/<think>[\s\S]*?(<\/think>|$)/gi, "").trim()) { reasoning = true; text = ""; }
+    return { text: String(text), thinkingOnly: !String(text).trim() && reasoning };
+}
+
+async function aiAsk(system, user, maxTokens) {
+    const ai = state.ai;
+    // Thinking models spend tokens before answering, so never run them on a tiny budget.
+    const tokens = ai.provider === "anthropic" ? (maxTokens || 4096) : Math.max(maxTokens || 4096, 3000);
+    let r;
+    if (ai.provider === "ollama") {
+        // think:false really switches Qwen3-style thinking off. Older Ollama or a proxy may refuse the option: retry without.
+        try { r = await aiOnce(system, user, tokens, { think: false }); }
+        catch (e) { if (!e.status) throw e; r = await aiOnce(system, user, tokens, null); }
+    } else {
+        r = await aiOnce(system, user, tokens, null);
+    }
+    if (r.thinkingOnly && ai.provider === "openai") {
+        // Ask the server to switch thinking off (Ollama / Open WebUI / llama.cpp spellings) and allow more room.
+        try { r = await aiOnce(system, user, Math.max(tokens, 6000), { think: false, reasoning_effort: "none" }); }
+        catch (e) { if (e.status !== 400 && e.status !== 422) throw e; }
+    }
+    if (r.thinkingOnly) throw new Error(THINKING_ERROR);
+    if (!r.text.trim()) throw new Error("The model returned an empty reply (check the model name).");
+    return r.text;
 }
 
 let lastRaw = "";
@@ -940,11 +985,12 @@ function aiSettings() {
     const a = state.ai;
     form("AI server", [
         { id: "provider", label: "Type", type: "select", value: a.provider, options: [
+            { value: "ollama", label: "Ollama (also Open WebUI's /ollama) — same as Zeolite" },
             { value: "anthropic", label: "Claude API (Anthropic)" },
-            { value: "openai", label: "OpenAI-compatible server (Ollama, LM Studio…)" }
+            { value: "openai", label: "OpenAI-compatible server (LM Studio, llama.cpp…)" }
         ] },
-        { id: "url", label: "Server URL (blank = official Claude API). Open WebUI: http://host:3000/api — Ollama: http://host:11434", type: "url", value: a.url, placeholder: "http://192.168.129.34:3000/api" },
-        { id: "key", label: "API key (Open WebUI: Settings → Account → API keys; Ollama: none)", type: "password", value: a.key },
+        { id: "url", label: "Server URL (blank = official Claude API). Ollama type: http://host:11434 or Open WebUI http://host:3000/ollama", type: "url", value: a.url, placeholder: "http://192.168.129.34:3000/ollama" },
+        { id: "key", label: "API key (Open WebUI: Settings → Account → API keys; plain Ollama: none)", type: "password", value: a.key },
         { id: "model", label: "Model", value: a.model, placeholder: "claude-haiku-4-5-20251001 or llama3.1" },
         { id: "lang", label: "Language for category names", value: a.lang || "English" }
     ], "Save", (v) => {
