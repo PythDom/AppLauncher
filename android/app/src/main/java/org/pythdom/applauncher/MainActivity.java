@@ -1,6 +1,9 @@
 package org.pythdom.applauncher;
 
 import android.app.Activity;
+import android.app.AppOpsManager;
+import android.app.usage.UsageStats;
+import android.app.usage.UsageStatsManager;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
@@ -358,6 +361,57 @@ public class MainActivity extends Activity {
                     Toast.makeText(MainActivity.this, "Cannot uninstall this app", Toast.LENGTH_SHORT).show();
                 }
             });
+        }
+
+        /** True once the user has allowed "Usage access" for this app in Android settings. */
+        @JavascriptInterface
+        public boolean usageAccess() {
+            try {
+                AppOpsManager ops = (AppOpsManager) getSystemService(Context.APP_OPS_SERVICE);
+                int mode = ops.checkOpNoThrow("android:get_usage_stats", android.os.Process.myUid(), getPackageName());
+                return mode == AppOpsManager.MODE_ALLOWED;
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public void openUsageSettings() {
+            runOnUiThread(() -> {
+                try {
+                    Intent i = new Intent(android.provider.Settings.ACTION_USAGE_ACCESS_SETTINGS,
+                            Uri.parse("package:" + getPackageName()));
+                    i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(i);
+                } catch (Exception e) {
+                    try {
+                        Intent i = new Intent(android.provider.Settings.ACTION_USAGE_ACCESS_SETTINGS);
+                        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        startActivity(i);
+                    } catch (Exception e2) {
+                        Toast.makeText(MainActivity.this, "Cannot open usage access settings", Toast.LENGTH_SHORT).show();
+                    }
+                }
+            });
+        }
+
+        /** {"package": millisecondsInForeground} over the last 30 days; {} without permission. */
+        @JavascriptInterface
+        public String usageStats() {
+            JSONObject o = new JSONObject();
+            try {
+                UsageStatsManager m = (UsageStatsManager) getSystemService(Context.USAGE_STATS_SERVICE);
+                long end = System.currentTimeMillis();
+                long start = end - 30L * 24 * 60 * 60 * 1000;
+                Map<String, UsageStats> map = m.queryAndAggregateUsageStats(start, end);
+                for (Map.Entry<String, UsageStats> e : map.entrySet()) {
+                    long t = e.getValue().getTotalTimeInForeground();
+                    if (t > 0) o.put(e.getKey(), t);
+                }
+            } catch (Exception e) {
+                // no permission or no data: the page falls back to launch counts
+            }
+            return o.toString();
         }
 
         @JavascriptInterface

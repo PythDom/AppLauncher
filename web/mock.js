@@ -34,6 +34,10 @@
         ["AI", /anthropic/]
     ];
 
+    const KW = { Communication: "email, chat, messages, call, contacts", Social: "social network, friends, posts", Media: "video, music, streaming, photos, movies",
+        "Music Tools": "guitar, tuner, practice, recording, instrument", Finance: "bank, money, payment, transfer", Travel: "map, navigation, train, journey",
+        Utilities: "tool, calculator, clock, calendar, files, settings", Stores: "store, install, download apps", AI: "assistant, chat, ai", Other: "misc" };
+
     function fakeModel(user) {
         const lines = user.split(/(?:APPS|ITEMS):\n/)[1].split("\n");
         const out = { categories: [], apps: {} };
@@ -58,6 +62,9 @@
         loadState: () => localStorage.getItem("mock-state") || "",
         saveState: (s) => localStorage.setItem("mock-state", s),
         copyText: (t) => { window.__clip = t; },
+        usageAccess: () => localStorage.getItem("mock-usage") === "1",
+        openUsageSettings: () => { window.__usageSettingsOpened = true; localStorage.setItem("mock-usage", "1"); },
+        usageStats: () => JSON.stringify({ "com.spotify.music": 900000000, "com.whatsapp": 700000000, "com.google.android.youtube": 500000000, "com.android.chrome": 400000000, "deezer.android.app": 100 }),
         httpPost: (id, url, headers, body) => {
             setTimeout(() => {
                 try {
@@ -71,11 +78,23 @@
                     if (/mock-empty/.test(url)) { window.__httpResult(id, 200, JSON.stringify({ choices: [{ message: { content: "" } }] })); return; }
                     if (/mock-reason/.test(url)) { window.__httpResult(id, 200, JSON.stringify({ choices: [{ message: { content: "", reasoning: "Let me think..." } }] })); return; }
                     if (/mock-fail/.test(url)) { window.__httpResult(id, 500, '{"error":"model overloaded"}'); return; }
+                    const system = anthropic ? (b.system || "") : (b.messages[0].content || "");
                     let text = user === "ping" ? '{"ok":true}' : fakeModel(user);
-                    if (user !== "ping") {
+                    if (user !== "ping" && /write search keywords/.test(system)) {
+                        const ents = user.split(/ITEMS:\n/)[1].split("\n").map((l) => l.match(/^(\S+) \| (.*)$/)).filter(Boolean);
+                        const o = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
+                        text = ents.map((m) => m[1] + " | " + KW[(o.apps[m[1]] || {}).c || "Other"]).join("\n");
+                    } else if (user !== "ping" && /find apps on a phone/.test(system)) {
+                        const q = user.match(/The user wants: (.*)\n/)[1].toLowerCase().split(/\s+/);
+                        const ents = user.split(/ITEMS:\n/)[1].split("\n").map((l) => l.split(" | ")).filter((p) => p.length >= 2);
+                        text = ents.map((p) => ({ k: p[0], s: q.filter((w) => p.join(" ").toLowerCase().includes(w)).length }))
+                            .filter((x) => x.s).sort((a, c) => c.s - a.s).slice(0, 8).map((x) => x.k).join("\n") || "none";
+                    } else if (user !== "ping") {
                         const obj = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
                         const lines = user.split(/(?:APPS|ITEMS):\n/)[1].split("\n").map((l) => l.match(/^(\S+) \| (.*)$/)).filter(Boolean);
+                        text = lines.map((m) => m[1] + " | " + obj.apps[m[1]].c + " | " + KW[obj.apps[m[1]].c]).join("\n");
                         if (/mock-garbage/.test(url)) text = "I'm sorry, I can't help with that.";
+                        else if (/mock-json/.test(url)) text = JSON.stringify(obj);
                         else if (/mock-think/.test(url)) text = "<think>maybe {\"x\":1} first</think>" + JSON.stringify(obj);
                         else if (/mock-lines/.test(url)) text = "Sure! Here is the sorting:\n```\n" + lines.map((m, n) => (n % 2 ? "- " : "") + m[1] + " | " + obj.apps[m[1]].c + " | " + (obj.apps[m[1]].rare ? "rare" : "common")).join("\n") + "\n```\nHope that helps!";
                         else if (/mock-array/.test(url)) text = JSON.stringify({ apps: lines.map((m) => ({ package: m[1], category: obj.apps[m[1]].c })) });

@@ -30,7 +30,7 @@ function flush() {
 function commit() { save(); render(); }
 
 function newState() {
-    return { v: 1, categories: [], items: [], unsortedCollapsed: false, ai: Object.assign({}, DEFAULT_AI) };
+    return { v: 1, categories: [], items: [], unsortedCollapsed: false, launches: {}, ai: Object.assign({}, DEFAULT_AI) };
 }
 
 function catById(id) { return state.categories.find((c) => c.id === id); }
@@ -194,10 +194,12 @@ function groupBlock(title, items, opts) {
     const grid = document.createElement("div");
     grid.className = "grid" + (opts.collapsed ? " collapsed" : "");
     if (!items.length) {
-        const e = document.createElement("div");
-        e.className = "empty";
-        e.textContent = "Empty — move apps here from their long-press menu.";
-        g.appendChild(e);
+        if (!opts.collapsed) {
+            const e = document.createElement("div");
+            e.className = "empty";
+            e.textContent = "Empty — move apps here from their long-press menu.";
+            g.appendChild(e);
+        }
     } else {
         items.forEach((i) => grid.appendChild(tile(i)));
     }
@@ -205,15 +207,14 @@ function groupBlock(title, items, opts) {
     return g;
 }
 
-function renderPage(el, page) {
+// Screen 1: category cards.
+function renderMain(el) {
     el.innerHTML = "";
-    const items = state.items.filter((i) => !i.hidden && i.page === page);
+    const items = state.items.filter((i) => !i.hidden);
     let any = false;
     for (const c of state.categories) {
-        const its = items.filter((i) => i.catId === c.id);
-        if (!its.length && page !== 0) continue;
         any = true;
-        el.appendChild(groupBlock(c.name, its, {
+        el.appendChild(groupBlock(c.name, items.filter((i) => i.catId === c.id), {
             collapsed: !!c.collapsed,
             toggle: () => { c.collapsed = !c.collapsed; commit(); },
             long: () => categorySheet(c)
@@ -232,19 +233,64 @@ function renderPage(el, page) {
     if (!any) {
         const e = document.createElement("div");
         e.className = "empty";
-        e.style.padding = "40px 16px";
-        e.style.textAlign = "center";
-        e.textContent = page === 1
-            ? "Second screen for rarely used apps.\nLong-press an app → “Move to second screen”."
-            : "Nothing here yet. Tap ＋ to add a category or shortcut.";
-        e.style.whiteSpace = "pre-line";
+        e.style.cssText = "padding:40px 16px;text-align:center";
+        e.textContent = "Nothing here yet. Tap ＋ to add a category or shortcut.";
         el.appendChild(e);
     }
 }
 
+// Screen 2: plain names only, most used first.
+let usageMs = {};
+let usageGranted = false;
+const hasUsageApi = () => typeof A.usageAccess === "function";
+
+function refreshUsage() {
+    try {
+        usageGranted = hasUsageApi() && !!A.usageAccess();
+        usageMs = usageGranted ? JSON.parse(A.usageStats()) : {};
+    } catch (e) { usageGranted = false; usageMs = {}; }
+}
+
+// Foreground time over the last 30 days (real usage, needs permission) plus launches made from here
+// (each counted as one minute), so shortcuts and the no-permission case still rank sensibly.
+function usageScore(i) {
+    const ms = i.type === "app" ? (usageMs[i.pkg] || 0) : 0;
+    return ms + ((state.launches || {})[i.id] || 0) * 60000;
+}
+
+function rankedItems() {
+    return state.items.filter((i) => !i.hidden)
+        .sort((a, b) => usageScore(b) - usageScore(a) || a.label.localeCompare(b.label));
+}
+
+function renderUsage(el) {
+    el.innerHTML = "";
+    if (hasUsageApi() && !usageGranted) {
+        const n = document.createElement("div");
+        n.className = "plainnote";
+        const t = document.createElement("span");
+        t.textContent = "Ranked by what you open from this launcher. For real usage across the phone, allow usage access.";
+        const b = document.createElement("button");
+        b.textContent = "Allow";
+        b.onclick = () => { try { A.openUsageSettings(); } catch (e) { /* ignore */ } };
+        n.append(t, b);
+        el.appendChild(n);
+    }
+    const list = document.createElement("div");
+    list.className = "plain";
+    rankedItems().forEach((i) => {
+        const r = document.createElement("div");
+        r.className = "pl" + (selected.has(i.id) ? " sel" : "");
+        r.textContent = i.label;
+        attachPress(r, () => onTap(i), () => onLong(i));
+        list.appendChild(r);
+    });
+    el.appendChild(list);
+}
+
 function render() {
-    renderPage($("page0"), 0);
-    renderPage($("page1"), 1);
+    renderMain($("page0"));
+    renderUsage($("page1"));
     renderSelectBar();
     renderResults();
 }
@@ -254,29 +300,82 @@ function renderSelectBar() {
     $("seln").textContent = selected.size + " selected";
 }
 
+// ---- search: name, package, AI-written keywords, category, site ----
+
+function fold(s) {
+    return String(s || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+}
+
+function hostOf(i) { return i.type === "link" ? safeHost(i.url) : ""; }
+
+function searchItems(q) {
+    const words = fold(q).split(/[\s,]+/).filter(Boolean);
+    if (!words.length) return [];
+    const res = [];
+    for (const i of state.items) {
+        if (i.hidden) continue;
+        const lab = fold(i.label);
+        const c = catOf(i);
+        const hay = fold([i.label, i.pkg, i.kw, c && c.name, hostOf(i)].join(" "));
+        let score = 0, all = true;
+        for (const w of words) {
+            if (lab.startsWith(w)) score += 5;
+            else if (lab.includes(w)) score += 4;
+            else if (hay.includes(w)) score += 2;
+            else all = false;
+        }
+        if (all) res.push({ i, score: score + 10 });
+        else if (score > 0) res.push({ i, score });
+    }
+    res.sort((a, b) => b.score - a.score || a.i.label.localeCompare(b.i.label));
+    return res.map((r) => r.i);
+}
+
+let aiHits = { q: "", ids: [] };
+
 function renderResults() {
-    const q = $("q").value.trim().toLowerCase();
+    const raw = $("q").value.trim();
     const box = $("results");
-    if (!q) { box.hidden = true; box.innerHTML = ""; return; }
+    if (!raw) { box.hidden = true; box.innerHTML = ""; return; }
     box.hidden = false;
     box.innerHTML = "";
-    const hits = state.items.filter((i) => !i.hidden && (i.label.toLowerCase().includes(q) || (i.pkg || "").toLowerCase().includes(q)));
-    if (!hits.length) {
+    const addGrid = (items, title) => {
+        if (title) {
+            const s = document.createElement("div");
+            s.className = "sect";
+            s.textContent = title;
+            box.appendChild(s);
+        }
+        const grid = document.createElement("div");
+        grid.className = "grid";
+        items.forEach((i) => grid.appendChild(tile(i)));
+        box.appendChild(grid);
+    };
+    const suggested = aiHits.q === raw ? aiHits.ids.map(itemById).filter((i) => i && !i.hidden) : [];
+    if (suggested.length) addGrid(suggested, "AI suggestions");
+    const hits = searchItems(raw).filter((i) => !suggested.includes(i));
+    if (hits.length) addGrid(hits, suggested.length ? "Other matches" : "");
+    if (!hits.length && !suggested.length) {
         const e = document.createElement("div");
         e.className = "empty";
         e.textContent = "No match.";
         box.appendChild(e);
-        return;
     }
-    const grid = document.createElement("div");
-    grid.className = "grid";
-    hits.forEach((i) => grid.appendChild(tile(i)));
-    box.appendChild(grid);
+    if (aiConfigured() && aiHits.q !== raw) {
+        const b = document.createElement("button");
+        b.className = "ask";
+        b.textContent = "✨ Ask AI to find “" + raw + "”";
+        b.onclick = () => aiFind(raw);
+        box.appendChild(b);
+    }
 }
 
 // -------------------------------------------------------- tap / long press ----
 
 function launch(item) {
+    state.launches = state.launches || {};
+    state.launches[item.id] = (state.launches[item.id] || 0) + 1;
+    save();
     if (item.type === "app") {
         let ok = false;
         try { ok = A.launch(item.pkg); } catch (e) { /* ignore */ }
@@ -527,11 +626,6 @@ function moveItems(ids, catId) {
     commit();
 }
 
-function setPage(ids, page) {
-    state.items.forEach((i) => { if (ids.has(i.id)) i.page = page; });
-    commit();
-}
-
 function setHidden(ids, hidden) {
     state.items.forEach((i) => { if (ids.has(i.id)) i.hidden = hidden; });
     commit();
@@ -539,10 +633,8 @@ function setHidden(ids, hidden) {
 
 function itemSheet(item) {
     const ids = new Set([item.id]);
-    const other = item.page === 0 ? "Move to second screen" : "Move to main screen";
     const buttons = [
         { label: "Move to category…", run: () => chooseCategory("Move “" + item.label + "” to", { unsorted: true }, (c) => moveItems(ids, c)) },
-        { label: other, run: () => setPage(ids, item.page === 0 ? 1 : 0) },
         { label: "Select several…", run: () => enterSelect(item.id) }
     ];
     if (item.type === "app") {
@@ -627,6 +719,7 @@ function addMenu() {
 function mainMenu() {
     sheet("Menu", [
         { label: "Sort with AI…", run: aiDialog },
+        { label: "Improve search with AI…", run: aiIndexDialog },
         { label: "Select several…", run: () => enterSelect(null) },
         { label: "Import old Launcher shortcuts", run: () => importLegacy(false) },
         { label: "Rescan installed apps", run: () => { const r = reconcile(); commit(); toast(r.added + " new, " + r.removed + " removed"); } },
@@ -635,7 +728,7 @@ function mainMenu() {
 }
 
 function settingsMenu() {
-    sheet("Settings", [
+    const buttons = [
         { label: "AI server…", run: aiSettings },
         { label: "Copy backup to clipboard", run: () => {
             const copy = JSON.parse(JSON.stringify(state));
@@ -651,7 +744,13 @@ function settingsMenu() {
             commit();
             toast("Reset — all apps are unsorted again");
         }) }
-    ]);
+    ];
+    if (hasUsageApi()) {
+        refreshUsage();
+        buttons.splice(1, 0, { label: usageGranted ? "Usage access: allowed ✓" : "Allow usage access (most-used list)…",
+            run: () => { try { A.openUsageSettings(); } catch (e) { /* ignore */ } } });
+    }
+    sheet("Settings", buttons);
 }
 
 function restoreForm() {
@@ -680,14 +779,11 @@ function selectionMove() {
     chooseCategory("Move " + selected.size + " items to", { unsorted: true }, (c) => { moveItems(selectedIds(), c); exitSelect(); });
 }
 
-function selectionMore() {
+function selectionHide() {
     if (!selected.size) { toast("Select something first"); return; }
-    const ids = selectedIds();
-    sheet(selected.size + " selected", [
-        { label: "Move to second screen", run: () => { setPage(ids, 1); exitSelect(); } },
-        { label: "Move to main screen", run: () => { setPage(ids, 0); exitSelect(); } },
-        { label: "Hide from launcher", run: () => { setHidden(ids, true); exitSelect(); } }
-    ]);
+    setHidden(selectedIds(), true);
+    toast("Hidden — bring them back via ＋ → App (from hidden)");
+    exitSelect();
 }
 
 // ---------------------------------------------------------------------- AI ----
@@ -826,7 +922,7 @@ function parseLines(t) {
         parts = parts.map((p) => p.trim().replace(/^["'`*]+|["'`*]+$/g, ""));
         if (parts.length < 2 || !parts[0] || !parts[1]) continue;
         if (/^key$/i.test(parts[0]) || /^category$/i.test(parts[1])) continue;
-        rows.push({ key: parts[0], cat: parts[1], rare: /rare/i.test(parts[2] || "") && !/not rare|common/i.test(parts[2] || "") });
+        rows.push({ key: parts[0], cat: parts[1], kw: parts.slice(2).join(", ") });
     }
     return rows;
 }
@@ -836,7 +932,7 @@ function toRows(text) {
     if (rows.length) return rows;
     let r = [];
     try { r = normaliseAi(parseJson(text)); } catch (e) { /* not JSON either */ }
-    if (!r.length) throw new Error("The model's reply wasn't in the expected format (lines like  package | Category | common).");
+    if (!r.length) throw new Error("The model's reply wasn't in the expected format (lines like  package | Category | keywords).");
     return r;
 }
 
@@ -844,9 +940,9 @@ const SYSTEM_PROMPT =
     "You organise the home screen of an Android phone. You receive installed apps and shortcuts, one per line as 'key | label'. " +
     "Put every item in exactly one category. Prefer the existing categories when they fit; otherwise create a new short category " +
     "(1-2 words, Title Case). Keep the total number of categories small (about 6 to 12). " +
-    "Mark an item 'rare' if a typical person rarely opens it (system utilities, carrier or manufacturer bloatware, setup helpers), otherwise 'common'. " +
-    "Reply with plain text ONLY: exactly one line per input item, in the form  key | Category | common  " +
-    "(copy the key exactly as given). Example line: com.example.mail | Communication | common. " +
+    "Also give 4 to 8 short search keywords or synonyms describing what the item is for (in English and in the requested language), comma-separated. " +
+    "Reply with plain text ONLY: exactly one line per input item, in the form  key | Category | keyword, keyword, keyword  " +
+    "(copy the key exactly as given). Example line: com.example.mail | Communication | email, inbox, messages, mail. " +
     "No headings, no explanations, no numbering, no markdown, no JSON.";
 
 function keyOf(i) { return i.type === "app" ? i.pkg : i.id; }
@@ -860,7 +956,7 @@ async function aiChunk(chunk) {
     lastAiReply = text;
     try { return toRows(text); }
     catch (e) {
-        text = await aiAsk(SYSTEM_PROMPT, user + "\n\nYour previous reply could not be read. Reply ONLY with lines in the form  key | Category | common", 4096);
+        text = await aiAsk(SYSTEM_PROMPT, user + "\n\nYour previous reply could not be read. Reply ONLY with lines in the form  key | Category | keywords", 4096);
         lastAiReply = text;
         return toRows(text);
     }
@@ -874,21 +970,21 @@ function safeHost(u) { try { return new URL(u).hostname; } catch (e) { return u;
 //   {"Cat":["pkg","Label",...]}  /  {"categories":{"Cat":[...]}}
 function normaliseAi(res) {
     const rows = [];
-    const add = (key, cat, rare) => { if (key && cat) rows.push({ key: String(key), cat: String(cat), rare: !!rare }); };
+    const add = (key, cat, kw) => { if (key && cat) rows.push({ key: String(key), cat: String(cat), kw: Array.isArray(kw) ? kw.join(", ") : String(kw || "") }); };
     const fromList = (cat, list) => {
         if (!Array.isArray(list)) return false;
-        list.forEach((x) => add(typeof x === "string" ? x : x && (x.key || x.package || x.pkg || x.label || x.name), cat, x && x.rare));
+        list.forEach((x) => add(typeof x === "string" ? x : x && (x.key || x.package || x.pkg || x.label || x.name), cat, x && (x.kw || x.keywords)));
         return true;
     };
     const a = res.apps;
     if (Array.isArray(a)) {
         a.forEach((e) => e && add(e.key || e.package || e.pkg || e.app || e.id || e.label || e.name,
-            e.c || e.category || e.cat, e.rare));
+            e.c || e.category || e.cat, e.kw || e.keywords));
     } else if (a && typeof a === "object") {
         for (const [k, v] of Object.entries(a)) {
-            if (typeof v === "string") add(k, v, false);
+            if (typeof v === "string") add(k, v, "");
             else if (Array.isArray(v)) fromList(k, v);
-            else if (v) add(k, v.c || v.category || v.cat, v.rare);
+            else if (v) add(k, v.c || v.category || v.cat, v.kw || v.keywords);
         }
     }
     if (!rows.length) {
@@ -914,7 +1010,7 @@ function applyAi(res, chunk, opts, created) {
         const cat = ensureCat(r.cat, created);
         if (!cat) continue;
         it.catId = cat.id;
-        if (opts.moveRare && r.rare) it.page = 1;
+        if (r.kw && r.kw.trim()) it.kw = r.kw.trim().slice(0, 200);
         matched.add(it.id);
     }
     return { applied: matched.size, replied: rows.length };
@@ -999,9 +1095,101 @@ function aiDialog() {
         { id: "scope", label: "What to sort", type: "select", value: unsorted ? "unsorted" : "all", options: [
             { value: "unsorted", label: "Only unsorted items (" + unsorted + ")" },
             { value: "all", label: "Everything (re-sort)" }
-        ] },
-        { id: "moveRare", label: "Also move rarely needed apps to the second screen", type: "checkbox", value: false }
-    ], "Start", (v) => { setTimeout(() => aiSort({ scope: v.scope, moveRare: v.moveRare }), 0); });
+        ] }
+    ], "Start", (v) => { setTimeout(() => aiSort({ scope: v.scope }), 0); });
+}
+
+// ---- search keywords for items that don't have any yet ----
+
+function parseKeywordLines(t) {
+    t = String(t).replace(/<think>[\s\S]*?<\/think>/gi, "").replace(/```[a-z]*/gi, "");
+    const rows = [];
+    for (let line of t.split(/\r?\n/)) {
+        line = line.trim().replace(/^([-*•]|\d+[.)])\s+/, "");
+        const p = line.split("|").map((x) => x.trim());
+        if (p.length < 2 || !p[0] || !p[1]) continue;
+        rows.push({ key: p[0], kw: p.slice(1).join(", ").slice(0, 200) });
+    }
+    return rows;
+}
+
+const INDEX_PROMPT =
+    "You write search keywords for apps and shortcuts on an Android phone. Each input line is 'key | label'. " +
+    "For every item write 5 to 8 short keywords or synonyms describing what it is for, in English and in the requested language, comma-separated. " +
+    "Reply with plain text ONLY: exactly one line per input item, in the form  key | keyword, keyword, keyword  (copy the key exactly as given). " +
+    "No headings, no explanations, no markdown.";
+
+function aiIndexDialog() {
+    if (!aiConfigured()) { toast("Set up the AI server first"); aiSettings(); return; }
+    const todo = state.items.filter((i) => !i.hidden && !i.kw).length;
+    if (!todo) { toast("Every item already has search keywords"); return; }
+    confirmSheet("Ask the AI to write search keywords for " + todo + " items? Then you can search by meaning (e.g. “money”, “music”).", "Start", () => aiIndex());
+}
+
+async function aiIndex() {
+    if (aiBusy) return;
+    aiBusy = true;
+    const say = progressCard("Writing search keywords");
+    const t0 = Date.now();
+    let stage = "Starting…";
+    const tick = setInterval(() => say(stage + "\n" + Math.round((Date.now() - t0) / 1000) + " s elapsed"), 1000);
+    try {
+        const targets = state.items.filter((i) => !i.hidden && !i.kw);
+        let done = 0;
+        for (let k = 0; k < targets.length; k += 40) {
+            const chunk = targets.slice(k, k + 40);
+            stage = "Batch " + (k / 40 + 1) + " of " + Math.ceil(targets.length / 40) + "…";
+            lastAiReply = ""; lastRaw = "";
+            const user = "Language: " + (state.ai.lang || "English") + "\nITEMS:\n" +
+                chunk.map((i) => keyOf(i) + " | " + i.label + (i.type === "link" ? " (" + safeHost(i.url) + ")" : "")).join("\n");
+            const text = await aiAsk(INDEX_PROMPT, user, 4096);
+            lastAiReply = text;
+            const byKey = new Map(chunk.map((i) => [keyOf(i).toLowerCase(), i]));
+            for (const r of parseKeywordLines(text)) {
+                const it = byKey.get(r.key.toLowerCase());
+                if (it) { it.kw = r.kw; done++; }
+            }
+            save();
+        }
+        clearInterval(tick);
+        closeOverlay();
+        toast(done ? "Search keywords added to " + done + " items" : "The AI answered, but nothing could be used", 5000);
+    } catch (e) {
+        clearInterval(tick);
+        resultCard("Could not write keywords", String(e.message || e), lastAiReply ? "Last reply:\n" + lastAiReply.slice(0, 3000) : lastRaw ? lastRaw.slice(0, 1500) : "");
+    } finally {
+        clearInterval(tick);
+        aiBusy = false;
+    }
+}
+
+// ---- "Ask AI": for queries the keywords don't cover ----
+
+async function aiFind(query) {
+    if (aiBusy) return;
+    aiBusy = true;
+    toast("Asking the AI…", 60000);
+    try {
+        const items = state.items.filter((i) => !i.hidden);
+        const lines = items.map((i) => keyOf(i) + " | " + i.label + (i.kw ? " | " + i.kw : ""));
+        const system = "You find apps on a phone that match what the user wants. Each input line is 'key | label | keywords'. " +
+            "Reply with plain text ONLY: up to 8 lines, each containing just a key copied exactly, best match first. No other text.";
+        const text = await aiAsk(system, "The user wants: " + query + "\nITEMS:\n" + lines.join("\n"), 1500);
+        const byKey = new Map(items.map((i) => [keyOf(i).toLowerCase(), i]));
+        const ids = [];
+        for (let l of text.replace(/<think>[\s\S]*?<\/think>/gi, "").split(/\r?\n/)) {
+            l = l.trim().replace(/^([-*•]|\d+[.)])\s+/, "").split("|")[0].trim().toLowerCase();
+            const it = byKey.get(l);
+            if (it && !ids.includes(it.id)) ids.push(it.id);
+        }
+        aiHits = { q: query, ids };
+        if (ids.length) $("toast").classList.remove("show"); else toast("The AI found nothing", 3000);
+        renderResults();
+    } catch (e) {
+        toast("AI error: " + e.message, 6000);
+    } finally {
+        aiBusy = false;
+    }
 }
 
 function aiSettings() {
@@ -1050,9 +1238,12 @@ function goPage(n, smooth) {
     p.scrollTo({ left: n * p.clientWidth, behavior: smooth ? "smooth" : "auto" });
 }
 
+let lastPage = 0;
 function updateDots() {
     const cur = pagerPage();
     document.querySelectorAll("#dots button").forEach((b) => b.classList.toggle("on", Number(b.dataset.p) === cur));
+    if (cur === 1 && lastPage !== 1) { refreshUsage(); renderUsage($("page1")); }   // fresh ranking each time it is opened
+    lastPage = cur;
 }
 
 window.__launcherBack = function () {
@@ -1075,9 +1266,12 @@ window.__onHome = function () {
 window.__onResume = function () {
     if (!state) return;
     const r = reconcile();
+    refreshUsage();
     if (r.added || r.removed) {
         commit();
         toast(r.added + " new app" + (r.added === 1 ? "" : "s") + (r.removed ? ", " + r.removed + " removed" : ""));
+    } else {
+        renderUsage($("page1"));
     }
 };
 
@@ -1090,7 +1284,9 @@ function init() {
     let first = false;
     if (!state || !Array.isArray(state.items)) { state = newState(); first = true; }
     state.ai = Object.assign({}, DEFAULT_AI, state.ai || {});
+    state.launches = state.launches || {};
     const r = reconcile();
+    refreshUsage();
     flush();
     render();
     if (first) toast("Found " + r.added + " apps. ⋮ → Sort with AI, or long-press to organise.", 6000);
@@ -1099,14 +1295,13 @@ function init() {
     $("q").addEventListener("input", renderResults);
     $("q").addEventListener("keydown", (e) => {
         if (e.key !== "Enter") return;
-        const q = $("q").value.trim().toLowerCase();
-        const hit = q && state.items.find((i) => !i.hidden && i.label.toLowerCase().includes(q));
+        const hit = searchItems($("q").value.trim())[0];
         if (hit) { launch(hit); $("q").value = ""; $("q").blur(); renderResults(); }
     });
     $("btnAdd").onclick = addMenu;
     $("btnMenu").onclick = mainMenu;
     $("selMove").onclick = selectionMove;
-    $("selMore").onclick = selectionMore;
+    $("selMore").onclick = selectionHide;
     $("selDone").onclick = exitSelect;
     $("pager").addEventListener("scroll", updateDots, { passive: true });
     document.querySelectorAll("#dots button").forEach((b) => { b.onclick = () => goPage(Number(b.dataset.p), true); });

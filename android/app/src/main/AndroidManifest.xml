@@ -1,8 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+    <!-- Special access the user grants in Settings → Usage access; used only to rank the most-used list. -->
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
 
     <!-- See and launch every app that has a launcher icon (no QUERY_ALL_PACKAGES needed). -->
     <queries>
