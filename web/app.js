@@ -1929,14 +1929,14 @@ function renderTime(body) {
         d.className = "zone" + (z.here ? " here" : "");
         const city = document.createElement("div");
         city.className = "zc";
-        city.textContent = (p.hour >= 7 && p.hour < 19 ? "☀️ " : "🌙 ") + (z.here ? "Here · " : "") + z.label;
+        city.textContent = (p.hour >= 7 && p.hour < 19 ? "☀️ " : "🌙 ") + (z.here ? "📍" : "") + z.label;
         const tm = document.createElement("div");
         tm.className = "zt";
         tm.textContent = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", timeZone: z.tz }).format(now);
         const dt = document.createElement("div");
         dt.className = "zd";
-        dt.textContent = new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric", month: "short", timeZone: z.tz }).format(now) +
-            (diff ? "  ·  " + (diff > 0 ? "+" : "") + diff + " d" : "");
+        dt.textContent = new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric", timeZone: z.tz }).format(now) +
+            (diff ? " · " + (diff > 0 ? "+" : "") + diff + "d" : "");
         d.append(city, tm, dt);
         grid.appendChild(d);
     });
@@ -1977,10 +1977,11 @@ function devCalendars() {
     try { return JSON.parse(A.calendars()); } catch (e) { return []; }
 }
 
+const AGENDA_DAYS = 14;
 function agendaWindow() {
     const d = new Date();
     d.setHours(0, 0, 0, 0);
-    return [d.getTime(), new Date(d.getFullYear(), d.getMonth(), d.getDate() + 7).getTime()];
+    return [d.getTime(), new Date(d.getFullYear(), d.getMonth(), d.getDate() + AGENDA_DAYS).getTime()];
 }
 
 async function icsText(f, force) {
@@ -2064,7 +2065,7 @@ function renderAgenda() {
         return;
     }
     let shown = 0;
-    for (let n = 0; n < 7; n++) {
+    for (let n = 0; n < AGENDA_DAYS; n++) {
         const ds = new Date(new Date(from).getFullYear(), new Date(from).getMonth(), new Date(from).getDate() + n).getTime();
         const de = new Date(new Date(from).getFullYear(), new Date(from).getMonth(), new Date(from).getDate() + n + 1).getTime();
         const list = agenda.items.filter((e) => e.begin < de && e.end > ds && (e.end > e.begin || e.begin >= ds));
@@ -2075,7 +2076,7 @@ function renderAgenda() {
         h.textContent = n === 0 ? "Today" : n === 1 ? "Tomorrow" : new Intl.DateTimeFormat(undefined, { weekday: "long", day: "numeric", month: "short" }).format(new Date(ds));
         body.appendChild(h);
         for (const e of list) {
-            if (shown++ > 40) break;
+            if (shown++ > 80) break;
             const r = document.createElement("div");
             const live = e.begin <= now && e.end > now && !e.allDay;
             r.className = "age" + (live ? " now" : "") + (n === 0 && e.end <= now && !e.allDay ? " past" : "");
@@ -2103,7 +2104,7 @@ function renderAgenda() {
     if (!shown) {
         const e = document.createElement("div");
         e.className = "empty";
-        e.textContent = agenda.at ? "No events in the next 7 days." : "Loading…";
+        e.textContent = agenda.at ? "No events in the next 14 days." : "Loading…";
         body.appendChild(e);
     }
     if (agenda.note) {
@@ -2357,6 +2358,90 @@ function weatherMenu() {
     sheet("Weather", buttons);
 }
 
+
+// ---------------------------------------------------------------- dock ----
+// Six favourite apps on one line under the weather; the user picks them.
+
+const DOCK_N = 6;
+const dockIds = () => {
+    const d = Array.isArray(state.dock) ? state.dock.slice(0, DOCK_N) : [];
+    while (d.length < DOCK_N) d.push(null);
+    return d;
+};
+
+function setDock(slot, id) {
+    const d = dockIds();
+    if (id) { const k = d.indexOf(id); if (k >= 0) d[k] = null; }   // an app sits in one slot only
+    d[slot] = id;
+    state.dock = d;
+    commit();
+}
+
+function dockPicker(slot) {
+    const w = document.createElement("div");
+    const t = document.createElement("h3");
+    t.textContent = "Choose an app for slot " + (slot + 1);
+    const q = document.createElement("input");
+    q.type = "search";
+    q.placeholder = "Filter…";
+    q.autocomplete = "off";
+    q.style.cssText = "width:100%;padding:10px;font-size:16px;border-radius:10px;border:1px solid var(--line);background:var(--tile);color:var(--text);margin-bottom:6px";
+    const list = document.createElement("div");
+    const all = state.items.filter((i) => !i.hidden).sort((a, b) => usageScore(b) - usageScore(a) || a.label.localeCompare(b.label));
+    const fill = () => {
+        list.innerHTML = "";
+        const f = fold(q.value.trim());
+        all.filter((i) => !f || fold(i.label).includes(f)).slice(0, 80).forEach((i) => {
+            const b = document.createElement("button");
+            b.className = "sbtn dockopt";
+            const img = document.createElement("img");
+            img.src = iconSrc(i);
+            img.onerror = () => { img.onerror = null; img.src = letterIcon(i.label); };
+            b.append(img, document.createTextNode(i.label));
+            b.onclick = () => { closeOverlay(); setDock(slot, i.id); };
+            list.appendChild(b);
+        });
+    };
+    q.oninput = fill;
+    fill();
+    const row = document.createElement("div");
+    row.className = "row";
+    const c = document.createElement("button");
+    c.textContent = "Cancel";
+    c.onclick = closeOverlay;
+    row.appendChild(c);
+    w.append(t, q, list, row);
+    showCard(w);
+}
+
+function renderDock(body) {
+    body.innerHTML = "";
+    const row = document.createElement("div");
+    row.className = "dock";
+    dockIds().forEach((id, slot) => {
+        const item = id && itemById(id);
+        const d = document.createElement("div");
+        d.className = "dslot" + (item ? "" : " empty");
+        if (item) {
+            const img = document.createElement("img");
+            img.src = iconSrc(item);
+            img.onerror = () => { img.onerror = null; img.src = letterIcon(item.label); };
+            const l = document.createElement("div");
+            l.textContent = item.label;
+            d.append(img, l);
+            attachPress(d, () => launch(item), () => sheet(item.label, [
+                { label: "Replace…", run: () => dockPicker(slot) },
+                { label: "Remove from the bar", run: () => setDock(slot, null) }
+            ]));
+        } else {
+            d.textContent = "+";
+            d.onclick = () => dockPicker(slot);
+        }
+        row.appendChild(d);
+    });
+    body.appendChild(row);
+}
+
 // ---------------------------------------------------------------- page ----
 
 function renderDash(el) {
@@ -2368,7 +2453,10 @@ function renderDash(el) {
     const wx = dashCard("Weather", [["⋯", weatherMenu, "Weather options"]]);
     wx.body.id = "wxBody";
     wx.title.id = "wxTitle";
-    el.append(time.card, ag.card, wx.card);
+    const dk = dashCard("Favourites", []);
+    dk.body.id = "dockBody";
+    el.append(time.card, ag.card, wx.card, dk.card);
+    renderDock(dk.body);
     renderTime(time.body);
     renderAgenda();
     renderWeather();
