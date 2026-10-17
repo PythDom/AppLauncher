@@ -586,6 +586,28 @@ function shortcutForm(item) {
     });
 }
 
+// Web shortcuts carried over from the first Launcher app (bundled as legacy-shortcuts.json).
+// Adds only what is missing, into categories of the same name (created if needed).
+async function importLegacy(auto) {
+    let list;
+    try { list = await (await fetch("legacy-shortcuts.json")).json(); }
+    catch (e) { if (!auto) toast("Could not read the bundled shortcuts"); return; }
+    const urls = new Set(state.items.filter((i) => i.type === "link").map((i) => i.url.replace(/\/+$/, "").toLowerCase()));
+    let added = 0;
+    for (const e of list) {
+        const id = "s:legacy-" + e.id;
+        if (itemById(id) || urls.has(e.url.replace(/\/+$/, "").toLowerCase())) continue;
+        const cat = ensureCat(e.cat);
+        const it = { id, type: "link", label: e.name, url: e.url, catId: cat ? cat.id : null, page: 0 };
+        if (e.icon) it.icon = e.icon;
+        state.items.push(it);
+        added++;
+    }
+    state.legacyImported = true;
+    commit();
+    if (!auto || added) toast(added ? "Added " + added + " web shortcuts from the old Launcher" : "All old shortcuts are already there", 4000);
+}
+
 function hiddenAppsSheet() {
     const hidden = state.items.filter((i) => i.hidden);
     if (!hidden.length) { toast("No hidden apps"); return; }
@@ -606,6 +628,7 @@ function mainMenu() {
     sheet("Menu", [
         { label: "Sort with AI…", run: aiDialog },
         { label: "Select several…", run: () => enterSelect(null) },
+        { label: "Import old Launcher shortcuts", run: () => importLegacy(false) },
         { label: "Rescan installed apps", run: () => { const r = reconcile(); commit(); toast(r.added + " new, " + r.removed + " removed"); } },
         { label: "Settings & backup…", run: settingsMenu }
     ]);
@@ -1071,6 +1094,7 @@ function init() {
     flush();
     render();
     if (first) toast("Found " + r.added + " apps. ⋮ → Sort with AI, or long-press to organise.", 6000);
+    if (!state.legacyImported) importLegacy(true);
 
     $("q").addEventListener("input", renderResults);
     $("q").addEventListener("keydown", (e) => {

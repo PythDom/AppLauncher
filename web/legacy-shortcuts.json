@@ -1,0 +1,177 @@
+[
+  {
+    "id": "news-1",
+    "cat": "News",
+    "name": "Local IP News",
+    "url": "http://192.168.129.34:8280",
+    "icon": "icons/legacy/ttrss.png"
+  },
+  {
+    "id": "news-2",
+    "cat": "News",
+    "name": "RTBF Info",
+    "url": "https://www.rtbf.be/info",
+    "icon": "icons/legacy/RTBF.png"
+  },
+  {
+    "id": "news-3",
+    "cat": "News",
+    "name": "L'Echo",
+    "url": "https://www.lecho.be/",
+    "icon": "icons/legacy/lecho.png"
+  },
+  {
+    "id": "news-4",
+    "cat": "News",
+    "name": "RTBF Sport",
+    "url": "https://www.rtbf.be/sport/direct/football/pro-league/resultats",
+    "icon": "icons/legacy/RTBF_-_Scores.png"
+  },
+  {
+    "id": "movies-1",
+    "cat": "Movies",
+    "name": "IMDB",
+    "url": "https://www.imdb.com/",
+    "icon": "icons/legacy/imdb-icon.png"
+  },
+  {
+    "id": "movies-2",
+    "cat": "Movies",
+    "name": "Quai10",
+    "url": "https://www.quai10.be/cinema",
+    "icon": "icons/legacy/Quai10.png"
+  },
+  {
+    "id": "movies-3",
+    "cat": "Movies",
+    "name": "Premiere",
+    "url": "https://www.premiere.fr/",
+    "icon": "icons/legacy/premiere.png"
+  },
+  {
+    "id": "id-mu059gtwaya5y",
+    "cat": "Movies",
+    "name": "Streamscore",
+    "url": "https://pythdom.github.io/streamscore",
+    "icon": "icons/legacy/id-mu059gtwaya5y.png"
+  },
+  {
+    "id": "dico-1",
+    "cat": "Dictionaries",
+    "name": "Dictionnaire Académie",
+    "url": "https://www.dictionnaire-academie.fr/",
+    "icon": "icons/legacy/Dico_academie_fr.png"
+  },
+  {
+    "id": "dico-2",
+    "cat": "Dictionaries",
+    "name": "Merriam-Webster",
+    "url": "https://www.merriam-webster.com/",
+    "icon": "icons/legacy/merriam-webster150x150.png"
+  },
+  {
+    "id": "dico-3",
+    "cat": "Dictionaries",
+    "name": "DeepL",
+    "url": "https://www.deepl.com/en/translator",
+    "icon": "icons/legacy/deepL.png"
+  },
+  {
+    "id": "ai-1",
+    "cat": "Search & AI",
+    "name": "Gemini",
+    "url": "https://gemini.google.com/",
+    "icon": "icons/legacy/Gemini_language_model_logo.png"
+  },
+  {
+    "id": "ai-2",
+    "cat": "Search & AI",
+    "name": "ChatGPT",
+    "url": "https://chatgpt.com/",
+    "icon": "icons/legacy/ChatGPT.png"
+  },
+  {
+    "id": "ai-3",
+    "cat": "Search & AI",
+    "name": "Copilot",
+    "url": "https://copilot.microsoft.com/",
+    "icon": "icons/legacy/copilot-logo_0.png"
+  },
+  {
+    "id": "id-mu4lb27pwu49q",
+    "cat": "Games",
+    "name": "Molkky Score",
+    "url": "http://Molkky.randdom.org",
+    "icon": "icons/legacy/id-mu4lb27pwu49q.png"
+  },
+  {
+    "id": "id-mu4lbk8kk6o81",
+    "cat": "Games",
+    "name": "Yathzee Scores",
+    "url": "http://yahtzee.randdom.org",
+    "icon": "icons/legacy/id-mu4lbk8kk6o81.png"
+  },
+  {
+    "id": "useful-7",
+    "cat": "Games",
+    "name": "Payscap",
+    "url": "http://payscap.randdom.org",
+    "icon": "icons/legacy/payscap.jpg"
+  },
+  {
+    "id": "useful-1",
+    "cat": "Useful Links",
+    "name": "Santander",
+    "url": "https://secure.santanderconsumerbank.be/mdib-santander/session",
+    "icon": "icons/legacy/santander-bank-logo-rounded-square-icon-free-png.webp"
+  },
+  {
+    "id": "useful-2",
+    "cat": "Useful Links",
+    "name": "Belgian Train",
+    "url": "https://www.belgiantrain.be/en",
+    "icon": "icons/legacy/SNCB_logo.svg.png"
+  },
+  {
+    "id": "useful-3",
+    "cat": "Useful Links",
+    "name": "Namecheap",
+    "url": "https://ap.www.namecheap.com/domains/domaincontrolpanel/randdom.org/domain",
+    "icon": "icons/legacy/namecheap.png"
+  },
+  {
+    "id": "useful-4",
+    "cat": "Useful Links",
+    "name": "Immich",
+    "url": "http://immich.randdom.org/",
+    "icon": "icons/legacy/immich-logo.png"
+  },
+  {
+    "id": "stores-1",
+    "cat": "Online Stores",
+    "name": "Amazon.be",
+    "url": "https://www.amazon.com.be/?language=fr_BE",
+    "icon": "icons/legacy/Amazon-150x150.png"
+  },
+  {
+    "id": "stores-2",
+    "cat": "Online Stores",
+    "name": "Thomann",
+    "url": "https://www.thomann.de/be/index.html",
+    "icon": "icons/legacy/Thomann.png"
+  },
+  {
+    "id": "id-muinohml8d7ta",
+    "cat": "Apps",
+    "name": "Syndic",
+    "url": "http://192.168.129.34:7500",
+    "icon": "icons/legacy/id-muinohml8d7ta.png"
+  },
+  {
+    "id": "id-mur8v3jo7hjd9",
+    "cat": "Apps",
+    "name": "Pharmacie",
+    "url": "https://pythdom.github.io/Pharmacie/",
+    "icon": "icons/legacy/id-mur8v3jo7hjd9.png"
+  }
+]
