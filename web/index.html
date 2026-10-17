@@ -47,6 +47,15 @@ header button { width: 40px; height: 40px; font-size: 20px; border-radius: 50%; 
       border-bottom: 1px solid var(--line); user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
 .pl:active { background: var(--line); }
 .pl.sel { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+/* screen 0: keyword cloud */
+.cloudnote { font-size: 13px; color: var(--muted); text-align: center; padding: 10px 14px 0; }
+.cloud { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 4px 6px; padding: 14px 4px 24px; }
+.kw { border: 0; background: transparent; padding: 3px 7px; border-radius: 12px; font-family: Arial, Helvetica, sans-serif;
+      font-weight: 700; line-height: 1.15; cursor: pointer; }
+.kw:active { background: var(--line); }
+.cloudhead { display: flex; align-items: center; gap: 10px; padding: 6px 4px 4px; }
+.cloudhead button { padding: 8px 14px; border-radius: 12px; border: 1px solid var(--line); background: var(--tile); color: var(--text); font-size: 15px; }
+.cloudhead .t { font-size: 20px; font-weight: 700; flex: 1; }
 .ask { margin: 10px 4px; padding: 12px; width: calc(100% - 8px); border-radius: 14px; border: 1px dashed var(--accent);
        background: transparent; color: var(--accent); font-size: 15px; }
 .sect { font-size: 13px; color: var(--muted); padding: 10px 8px 2px; }
@@ -113,10 +122,11 @@ header button { width: 40px; height: 40px; font-size: 20px; border-radius: 50%; 
     <button id="btnMenu" title="Menu">⋮</button>
   </header>
   <div id="pager">
+    <section class="page" id="pageCloud"></section>
     <section class="page" id="page0"></section>
     <section class="page" id="page1"></section>
   </div>
-  <div id="dots"><button class="on" data-p="0" aria-label="Main screen"></button><button data-p="1" aria-label="Most used list"></button></div>
+  <div id="dots"><button data-p="0" aria-label="Keyword cloud"></button><button class="on" data-p="1" aria-label="Main screen"></button><button data-p="2" aria-label="Most used list"></button></div>
   <div id="results" hidden></div>
   <div id="selbar" hidden>
     <span class="n" id="seln"></span>

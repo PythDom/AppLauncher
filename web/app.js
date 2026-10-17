@@ -288,7 +288,104 @@ function renderUsage(el) {
     el.appendChild(list);
 }
 
+// Screen 0 (swipe right from the main screen): cloud of the AI keywords; tap a word to see everything related.
+let cloudSel = null;
+
+function kwList(i) {
+    return (i.kw || "").split(/[,;\n]/).map((s) => s.trim()).filter((s) => s.length > 1 && s.length < 30);
+}
+
+function cloudWords() {
+    const m = new Map();
+    for (const i of state.items) {
+        if (i.hidden) continue;
+        const seen = new Set();
+        for (const w of kwList(i)) {
+            const k = fold(w);
+            if (seen.has(k)) continue;
+            seen.add(k);
+            const e = m.get(k) || { k, label: w, n: 0 };
+            e.n++;
+            m.set(k, e);
+        }
+    }
+    return [...m.values()];
+}
+
+function relatedItems(k) {
+    return state.items.filter((i) => !i.hidden && (kwList(i).some((w) => fold(w) === k) || fold(i.label).includes(k)));
+}
+
+function renderCloud(el) {
+    el.innerHTML = "";
+    if (cloudSel) {
+        const head = document.createElement("div");
+        head.className = "cloudhead";
+        const back = document.createElement("button");
+        back.textContent = "← Cloud";
+        back.onclick = () => { cloudSel = null; renderCloud(el); };
+        const t = document.createElement("span");
+        t.className = "t";
+        t.textContent = cloudSel.label;
+        head.append(back, t);
+        el.appendChild(head);
+        const items = relatedItems(cloudSel.k);
+        if (!items.length) {
+            const e = document.createElement("div");
+            e.className = "empty";
+            e.textContent = "Nothing matches any more.";
+            el.appendChild(e);
+            return;
+        }
+        const card = document.createElement("div");
+        card.className = "group";
+        const grid = document.createElement("div");
+        grid.className = "grid";
+        items.forEach((i) => grid.appendChild(tile(i)));
+        card.appendChild(grid);
+        el.appendChild(card);
+        return;
+    }
+    const words = cloudWords();
+    if (!words.length) {
+        const e = document.createElement("div");
+        e.className = "empty";
+        e.style.cssText = "padding:40px 20px;text-align:center;white-space:pre-line";
+        e.textContent = "The keyword cloud is built from the search keywords the AI writes for your apps.\n\n";
+        const b = document.createElement("button");
+        b.className = "ask";
+        b.textContent = aiConfigured() ? "✨ Write keywords with AI" : "Set up the AI server…";
+        b.onclick = () => (aiConfigured() ? aiIndexDialog() : aiSettings());
+        el.append(e, b);
+        return;
+    }
+    words.sort((a, b) => b.n - a.n || a.k.localeCompare(b.k));
+    const top = words.slice(0, 90);
+    const max = top[0].n, min = top[top.length - 1].n;
+    top.sort((a, b) => a.k.localeCompare(b.k));
+    const note = document.createElement("div");
+    note.className = "cloudnote";
+    note.textContent = "Tap a word to see all the apps and shortcuts that match.";
+    const cloud = document.createElement("div");
+    cloud.className = "cloud";
+    for (const w of top) {
+        let h = 0;
+        for (let k = 0; k < w.k.length; k++) h = (h * 31 + w.k.charCodeAt(k)) % 360;
+        const b = document.createElement("button");
+        b.className = "kw";
+        b.textContent = w.label;
+        const f = max === min ? 0.4 : (w.n - min) / (max - min);
+        b.style.fontSize = Math.round(15 + 21 * f) + "px";
+        b.style.color = "hsl(" + h + ",62%,52%)";
+        b.title = w.n + (w.n === 1 ? " item" : " items");
+        b.onclick = () => { cloudSel = { k: w.k, label: w.label }; renderCloud(el); el.scrollTop = 0; };
+        cloud.appendChild(b);
+    }
+    el.append(note, cloud);
+}
+
 function render() {
+    renderCloud($("pageCloud"));
     renderMain($("page0"));
     renderUsage($("page1"));
     renderSelectBar();
@@ -1207,6 +1304,8 @@ function aiSettings() {
     ], "Save", (v) => {
         Object.assign(state.ai, { provider: v.provider, url: v.url.trim(), key: v.key.trim(), model: v.model.trim(), lang: v.lang.trim() || "English" });
         save();
+        renderCloud($("pageCloud"));
+        renderResults();
         toast("AI settings saved");
     }, [{
         label: "Test",
@@ -1238,11 +1337,16 @@ function goPage(n, smooth) {
     p.scrollTo({ left: n * p.clientWidth, behavior: smooth ? "smooth" : "auto" });
 }
 
-let lastPage = 0;
+// Screens, in swipe order: 0 keyword cloud | 1 main (home) | 2 most-used list.
+const PAGE_CLOUD = 0, PAGE_MAIN = 1, PAGE_USAGE = 2;
+let lastPage = PAGE_MAIN;
 function updateDots() {
     const cur = pagerPage();
     document.querySelectorAll("#dots button").forEach((b) => b.classList.toggle("on", Number(b.dataset.p) === cur));
-    if (cur === 1 && lastPage !== 1) { refreshUsage(); renderUsage($("page1")); }   // fresh ranking each time it is opened
+    if (cur === lastPage) return;
+    if (cur === PAGE_USAGE) { refreshUsage(); renderUsage($("page1")); }       // fresh ranking each time it is opened
+    if (cur === PAGE_CLOUD) renderCloud($("pageCloud"));
+    if (lastPage === PAGE_CLOUD && cloudSel) { cloudSel = null; renderCloud($("pageCloud")); }   // leave it on the cloud itself
     lastPage = cur;
 }
 
@@ -1250,7 +1354,8 @@ window.__launcherBack = function () {
     if ($("overlay").classList.contains("open")) { closeOverlay(); return true; }
     if (selectMode) { exitSelect(); return true; }
     if ($("q").value) { $("q").value = ""; renderResults(); return true; }
-    if (pagerPage() !== 0) { goPage(0, true); return true; }
+    if (cloudSel) { cloudSel = null; renderCloud($("pageCloud")); return true; }
+    if (pagerPage() !== PAGE_MAIN) { goPage(PAGE_MAIN, true); return true; }
     return false;
 };
 
@@ -1260,7 +1365,7 @@ window.__onHome = function () {
     $("q").value = "";
     $("q").blur();
     renderResults();
-    goPage(0, true);
+    goPage(PAGE_MAIN, true);
 };
 
 window.__onResume = function () {
@@ -1289,6 +1394,8 @@ function init() {
     refreshUsage();
     flush();
     render();
+    goPage(PAGE_MAIN, false);                       // open on the main screen, cloud to its left, usage list to its right
+    requestAnimationFrame(() => goPage(PAGE_MAIN, false));
     if (first) toast("Found " + r.added + " apps. ⋮ → Sort with AI, or long-press to organise.", 6000);
     if (!state.legacyImported) importLegacy(true);
 
