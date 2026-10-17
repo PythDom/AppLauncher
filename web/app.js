@@ -214,22 +214,95 @@ function setAllCollapsed(c) {
     commit();
 }
 
+// Categories as a word cloud instead of cards: tap a name to open it (state.mainView = "cloud").
+let mainSel = null;   // "__un" or a category id while one category is open in the cloud view
+const UNSORTED = "__un";
+
+function renderCategoryCloud(el, items) {
+    if (mainSel && mainSel !== UNSORTED && !catById(mainSel)) mainSel = null;
+    if (mainSel) {
+        const isUn = mainSel === UNSORTED;
+        const c = isUn ? null : catById(mainSel);
+        const list = items.filter((i) => (isUn ? !catOf(i) : i.catId === mainSel));
+        const head = document.createElement("div");
+        head.className = "cloudhead";
+        const back = document.createElement("button");
+        back.textContent = "← Categories";
+        back.onclick = () => { mainSel = null; renderMain(el); };
+        const t = document.createElement("span");
+        t.className = "t";
+        t.textContent = isUn ? "Unsorted" : c.name;
+        const more = document.createElement("button");
+        more.textContent = "⋯";
+        more.onclick = () => (isUn ? unsortedSheet(list) : categorySheet(c));
+        head.append(back, t, more);
+        el.appendChild(head);
+        const card = document.createElement("div");
+        card.className = "group";
+        if (!list.length) {
+            const e = document.createElement("div");
+            e.className = "empty";
+            e.textContent = "Empty — move apps here from their long-press menu.";
+            card.appendChild(e);
+        } else {
+            const grid = document.createElement("div");
+            grid.className = "grid";
+            list.forEach((i) => grid.appendChild(tile(i)));
+            card.appendChild(grid);
+        }
+        el.appendChild(card);
+        return;
+    }
+    const entries = state.categories.map((c) => ({ id: c.id, label: c.name, items: items.filter((i) => i.catId === c.id), cat: c }));
+    const un = items.filter((i) => !catOf(i));
+    if (un.length) entries.push({ id: UNSORTED, label: "Unsorted", items: un, cat: null });
+    if (!entries.length) {
+        const e = document.createElement("div");
+        e.className = "empty";
+        e.style.cssText = "padding:40px 16px;text-align:center";
+        e.textContent = "Nothing here yet. Tap ＋ to add a category or shortcut.";
+        el.appendChild(e);
+        return;
+    }
+    const note = document.createElement("div");
+    note.className = "cloudnote";
+    note.textContent = "Tap a category to open it · long-press for rename, move, merge";
+    el.appendChild(note);
+    const fracs = sizeFractions(entries.map((x) => ({ n: x.items.length, items: x.items })));
+    const cloud = document.createElement("div");
+    cloud.className = "cloud";
+    entries.forEach((x, n) => {
+        const b = document.createElement("button");
+        b.className = "kw";
+        b.textContent = x.label + (x.items.length ? "" : " (empty)");
+        b.style.fontSize = Math.round(17 + 22 * fracs[n]) + "px";
+        b.style.color = x.cat ? "hsl(" + hueOf(x.label) + ",62%,52%)" : "var(--muted)";
+        attachPress(b, () => { mainSel = x.id; renderMain(el); el.scrollTop = 0; },
+            () => (x.cat ? categorySheet(x.cat) : unsortedSheet(x.items)));
+        cloud.appendChild(b);
+    });
+    el.appendChild(cloud);
+}
+
 function renderMain(el) {
     el.innerHTML = "";
     const items = state.items.filter((i) => !i.hidden);
     let any = false;
-    if (state.categories.length) {
+    const cloudView = state.mainView === "cloud";
+    if (state.categories.length || cloudView) {
         const bar = document.createElement("div");
         bar.className = "cardbar";
-        const mk = (label, c) => {
+        const mk = (label, fn) => {
             const b = document.createElement("button");
             b.textContent = label;
-            b.onclick = () => setAllCollapsed(c);
+            b.onclick = fn;
             return b;
         };
-        bar.append(mk("▸ Collapse all", true), mk("▾ Expand all", false));
-        el.appendChild(bar);
+        if (!cloudView) bar.append(mk("▸ Collapse all", () => setAllCollapsed(true)), mk("▾ Expand all", () => setAllCollapsed(false)));
+        bar.append(mk(cloudView ? "▦ Cards" : "☁ Word cloud", () => { state.mainView = cloudView ? "cards" : "cloud"; mainSel = null; commit(); }));
+        if (!(cloudView && mainSel)) el.appendChild(bar);
     }
+    if (cloudView) { renderCategoryCloud(el, items); return; }
     for (const c of state.categories) {
         any = true;
         el.appendChild(groupBlock(c.name, items.filter((i) => i.catId === c.id), {
@@ -376,18 +449,63 @@ function cloudWords() {
             if (hide.has(k) || no.has(k) || seen.has(k)) continue;
             seen.add(k);
             let e = m.get(k);
-            if (!e) { e = { k, n: 0, forms: new Map() }; m.set(k, e); }
-            e.n++;
+            if (!e) { e = { k, items: [], forms: new Map() }; m.set(k, e); }
+            e.items.push(i);
             e.forms.set(w, (e.forms.get(w) || 0) + 1);
         }
     }
-    const min = state.cloudMin || 1, out = [];
+    const out = [];
     for (const e of m.values()) {
-        if (e.n < min) continue;
         const forms = [...e.forms.entries()].sort((a, b) => b[1] - a[1] || a[0].length - b[0].length);
-        out.push({ k: e.k, label: (state.kwLabel || {})[e.k] || forms[0][0], n: e.n, variants: forms.map((f) => f[0]) });
+        out.push({ k: e.k, label: (state.kwLabel || {})[e.k] || forms[0][0], n: e.items.length, items: e.items, variants: forms.map((f) => f[0]) });
     }
     return out;
+}
+
+// Font-size fractions (0..1) for a list of {n, items}. By use: a word is as big as the apps behind it are used
+// (log scale, so one heavy app doesn't flatten everything); falls back to counts until there is any usage.
+function sizeFractions(list) {
+    let ws = list.map((x) => x.n);
+    if (state.cloudSize !== "count") {
+        const use = list.map((x) => x.items.reduce((a, i) => a + usageScore(i), 0));
+        if (use.some(Boolean)) ws = use;
+    }
+    const lg = ws.map((w) => Math.log(1 + w));
+    const lo = Math.min(...lg), hi = Math.max(...lg);
+    return lg.map((v) => (hi === lo ? 0.4 : (v - lo) / (hi - lo)));
+}
+
+function maxCommon() {
+    return state.cloudMaxN === undefined ? 10 : state.cloudMaxN;   // 0 = never hide
+}
+
+function pinnedKeys() { return state.kwPin || []; }
+
+function togglePin(w) {
+    state.kwPin = pinnedKeys().slice();
+    const at = state.kwPin.indexOf(w.k);
+    if (at >= 0) state.kwPin.splice(at, 1);
+    else if (state.kwPin.length >= 12) { toast("Pin at most 12 words — unpin one first"); return; }
+    else state.kwPin.push(w.k);
+    commit();
+}
+
+function makeCategoryFromWord(w) {
+    const related = relatedItems(w.k);
+    const unsorted = related.filter((i) => !catOf(i));
+    const name = w.label.charAt(0).toUpperCase() + w.label.slice(1);
+    const go = (items) => {
+        const c = ensureCat(name);
+        const ids = new Set(items.map((i) => i.id));
+        state.items.forEach((i) => { if (ids.has(i.id)) i.catId = c.id; });
+        cloudSel = null;
+        commit();
+        goPage(PAGE_MAIN, true);
+        toast("Category “" + c.name + "” now has " + items.length + " items");
+    };
+    const buttons = [{ label: "Move all " + related.length + " items there", run: () => go(related) }];
+    if (unsorted.length && unsorted.length < related.length) buttons.push({ label: "Only the " + unsorted.length + " unsorted ones", run: () => go(unsorted) });
+    sheet("Make “" + name + "” a category", buttons);
 }
 
 function relatedItems(k) {
@@ -448,8 +566,11 @@ function splitWord(k) {
 
 function wordSheet(w) {
     const merged = Object.values(state.kwAlias || {}).filter((v) => v === w.k).length;
+    const pinned = pinnedKeys().includes(w.k);
     const buttons = [
         { label: "Show apps (" + w.n + ")", run: () => { cloudSel = { k: w.k, label: w.label }; renderCloud($("pageCloud")); } },
+        { label: pinned ? "★ Unpin from the top" : "☆ Pin to the top", run: () => togglePin(w) },
+        { label: "Make this a category…", run: () => makeCategoryFromWord(w) },
         { label: "Merge into another word…", run: () => {
             const others = cloudWords().filter((x) => x.k !== w.k).sort((a, b) => a.label.localeCompare(b.label));
             if (!others.length) { toast("No other word to merge with"); return; }
@@ -482,6 +603,15 @@ function condenseMenu() {
         } },
         { label: "Only words used by 2+ items: " + ((state.cloudMin || 1) > 1 ? "ON" : "OFF"), run: () => {
             state.cloudMin = (state.cloudMin || 1) > 1 ? 1 : 2; commit();
+        } },
+        { label: "Hide very common words: " + (maxCommon() ? "more than " + maxCommon() + " items" : "OFF"), run: () => form("Hide very common words",
+            [{ id: "n", label: "Hide a word when it matches more than this many items (0 = never hide)", type: "number", value: String(maxCommon()) }], "Save", (v) => {
+                const n = parseInt(v.n, 10);
+                if (isNaN(n) || n < 0) { toast("Enter 0 or a positive number"); return false; }
+                state.cloudMaxN = n; commit();
+            }) },
+        { label: "Word size by: " + (state.cloudSize === "count" ? "number of apps" : "how much you use them"), run: () => {
+            state.cloudSize = state.cloudSize === "count" ? "use" : "count"; commit();
         } }
     ];
     if (hidden) buttons.push({ label: "Hidden words (" + hidden + ")…", run: () => sheet("Hidden words — tap to show again",
@@ -555,6 +685,22 @@ async function aiCondense() {
     }
 }
 
+function hueOf(s) {
+    let h = 0;
+    for (let k = 0; k < s.length; k++) h = (h * 31 + s.charCodeAt(k)) % 360;
+    return h;
+}
+
+function wordButton(w, frac, pinned) {
+    const b = document.createElement("button");
+    b.className = "kw" + (pinned ? " pin" : "");
+    b.textContent = w.label;
+    b.style.fontSize = Math.round(pinned ? 16 + 10 * frac : 15 + 21 * frac) + "px";
+    b.style.color = "hsl(" + hueOf(w.k) + ",62%,52%)";
+    attachPress(b, () => { cloudSel = { k: w.k, label: w.label }; renderCloud($("pageCloud")); $("pageCloud").scrollTop = 0; }, () => wordSheet(w));
+    return b;
+}
+
 function renderCloud(el) {
     el.innerHTML = "";
     if (cloudSel) {
@@ -566,7 +712,15 @@ function renderCloud(el) {
         const t = document.createElement("span");
         t.className = "t";
         t.textContent = cloudSel.label;
-        head.append(back, t);
+        const pin = document.createElement("button");
+        const isPinned = pinnedKeys().includes(cloudSel.k);
+        pin.textContent = isPinned ? "★" : "☆";
+        pin.title = isPinned ? "Unpin" : "Pin to the top";
+        pin.onclick = () => togglePin(cloudSel);
+        const mk = document.createElement("button");
+        mk.textContent = "＋ Category";
+        mk.onclick = () => makeCategoryFromWord(cloudSel);
+        head.append(back, t, pin, mk);
         el.appendChild(head);
         const items = relatedItems(cloudSel.k);
         if (!items.length) {
@@ -589,8 +743,8 @@ function renderCloud(el) {
         el.appendChild(card);
         return;
     }
-    const words = cloudWords();
-    if (!words.length && !(state.items.some((i) => i.kw))) {
+    const all = cloudWords();
+    if (!all.length && !(state.items.some((i) => i.kw))) {
         const e = document.createElement("div");
         e.className = "empty";
         e.style.cssText = "padding:40px 20px;text-align:center;white-space:pre-line";
@@ -602,39 +756,49 @@ function renderCloud(el) {
         el.append(e, b);
         return;
     }
+    const pinSet = new Set(pinnedKeys());
+    const pinnedWords = pinnedKeys().map((k) => all.find((w) => w.k === k)).filter(Boolean);
+    const minN = state.cloudMin || 1, maxN = maxCommon();
+    let tooCommon = 0;
+    const rest = all.filter((w) => {
+        if (pinSet.has(w.k) || w.n < minN) return false;
+        if (maxN && w.n > maxN) { tooCommon++; return false; }
+        return true;
+    });
     const bar = document.createElement("div");
     bar.className = "cloudbar";
     const note = document.createElement("span");
-    note.textContent = words.length + " words · tap to open, long-press to merge or hide";
+    note.textContent = rest.length + " words" + (tooCommon ? " · " + tooCommon + " very common hidden" : "") + " · tap to open, long-press for more";
     const cb = document.createElement("button");
     cb.textContent = "Condense…";
     cb.onclick = condenseMenu;
     bar.append(note, cb);
     el.appendChild(bar);
-    if (!words.length) {
+
+    if (pinnedWords.length) {
+        const row = document.createElement("div");
+        row.className = "pinrow";
+        const lab = document.createElement("span");
+        lab.className = "lab";
+        lab.textContent = "★ Pinned";
+        row.appendChild(lab);
+        const fr = sizeFractions(pinnedWords);
+        pinnedWords.forEach((w, n) => row.appendChild(wordButton(w, fr[n], true)));
+        el.appendChild(row);
+    }
+    if (!rest.length) {
         const e = document.createElement("div");
         e.className = "empty";
         e.textContent = "No words left with the current filters.";
         el.appendChild(e);
         return;
     }
-    const byCount = words.slice().sort((a, b) => b.n - a.n || a.k.localeCompare(b.k)).slice(0, 90);
-    const max = byCount[0].n, min = byCount[byCount.length - 1].n;
-    const top = byCount.sort((a, b) => a.k.localeCompare(b.k));
+    const top = rest.slice().sort((a, b) => b.n - a.n || a.k.localeCompare(b.k)).slice(0, 90)
+        .sort((a, b) => a.k.localeCompare(b.k));
+    const fracs = sizeFractions(top);
     const cloud = document.createElement("div");
     cloud.className = "cloud";
-    for (const w of top) {
-        let h = 0;
-        for (let k = 0; k < w.k.length; k++) h = (h * 31 + w.k.charCodeAt(k)) % 360;
-        const b = document.createElement("button");
-        b.className = "kw";
-        b.textContent = w.label;
-        const f = max === min ? 0.4 : (w.n - min) / (max - min);
-        b.style.fontSize = Math.round(15 + 21 * f) + "px";
-        b.style.color = "hsl(" + h + ",62%,52%)";
-        attachPress(b, () => { cloudSel = { k: w.k, label: w.label }; renderCloud(el); el.scrollTop = 0; }, () => wordSheet(w));
-        cloud.appendChild(b);
-    }
+    top.forEach((w, n) => cloud.appendChild(wordButton(w, fracs[n], false)));
     el.appendChild(cloud);
 }
 
@@ -1081,6 +1245,7 @@ function mainMenu() {
         { label: "Sort with AI…", run: aiDialog },
         { label: "Improve search with AI…", run: aiIndexDialog },
         { label: "Select several…", run: () => enterSelect(null) },
+        { label: state.mainView === "cloud" ? "Show categories as cards" : "Show categories as a word cloud", run: () => { state.mainView = state.mainView === "cloud" ? "cards" : "cloud"; mainSel = null; commit(); } },
         { label: "Import old Launcher shortcuts", run: () => importLegacy(false) },
         { label: "Rescan installed apps", run: () => { const r = reconcile(); commit(); toast(r.added + " new, " + r.removed + " removed"); } },
         { label: "Settings & backup…", run: settingsMenu }
@@ -1608,7 +1773,7 @@ function updateDots() {
     document.querySelectorAll("#dots button").forEach((b) => b.classList.toggle("on", Number(b.dataset.p) === cur));
     if (cur === lastPage) return;
     if (cur === PAGE_USAGE) { refreshUsage(); renderUsage($("page1")); }       // fresh ranking each time it is opened
-    if (cur === PAGE_CLOUD) renderCloud($("pageCloud"));
+    if (cur === PAGE_CLOUD) { refreshUsage(); renderCloud($("pageCloud")); }   // word sizes follow current usage
     if (lastPage === PAGE_CLOUD && cloudSel) { cloudSel = null; renderCloud($("pageCloud")); }   // leave it on the cloud itself
     lastPage = cur;
 }
@@ -1617,7 +1782,8 @@ window.__launcherBack = function () {
     if ($("overlay").classList.contains("open")) { closeOverlay(); return true; }
     if (selectMode) { exitSelect(); return true; }
     if ($("q").value) { $("q").value = ""; renderResults(); return true; }
-    if (cloudSel) { cloudSel = null; renderCloud($("pageCloud")); return true; }
+    if (cloudSel && pagerPage() === PAGE_CLOUD) { cloudSel = null; renderCloud($("pageCloud")); return true; }
+    if (mainSel && pagerPage() === PAGE_MAIN) { mainSel = null; renderMain($("page0")); return true; }
     if (pagerPage() !== PAGE_MAIN) { goPage(PAGE_MAIN, true); return true; }
     return false;
 };
@@ -1628,6 +1794,7 @@ window.__onHome = function () {
     $("q").value = "";
     $("q").blur();
     renderResults();
+    if (mainSel) { mainSel = null; renderMain($("page0")); }
     goPage(PAGE_MAIN, true);
 };
 
