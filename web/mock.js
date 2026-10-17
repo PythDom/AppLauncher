@@ -116,6 +116,38 @@
                     window.__httpResult(id, 500, String(e));
                 }
             }, 250);
-        }
+        },
+        // ---- dashboard: weather (real Open-Meteo through fetch), calendar feeds, calendars, location ----
+        httpGet: (id, url) => {
+            if (/mock\.ics/.test(url)) {
+                const d = new Date(); d.setDate(d.getDate() + 1);
+                const z = (n) => String(n).padStart(2, "0");
+                const day = d.getFullYear() + z(d.getMonth() + 1) + z(d.getDate());
+                const ics = ["BEGIN:VCALENDAR", "BEGIN:VEVENT", "UID:m1", "DTSTART;TZID=Romance Standard Time:" + day + "T090000", "DTEND;TZID=Romance Standard Time:" + day + "T100000",
+                    "SUMMARY:Outlook planning", "LOCATION:Room 4", "END:VEVENT", "END:VCALENDAR"].join("\r\n");
+                setTimeout(() => window.__httpResult(id, 200, ics), 100);
+                return;
+            }
+            fetch(url).then((r) => r.text().then((t) => window.__httpResult(id, r.status, t)), () => window.__httpResult(id, 0, "offline"));
+        },
+        hasCalendarAccess: () => localStorage.getItem("mock-cal") === "1",
+        requestCalendarAccess: (id) => { localStorage.setItem("mock-cal", "1"); setTimeout(() => window.__nativeResult(id, '{"granted":true}'), 50); },
+        calendars: () => JSON.stringify([
+            { id: "1", name: "Personal", account: "me@gmail.com", type: "com.google", color: "#1a73e8", visible: true },
+            { id: "2", name: "Work", account: "me@corp.com", type: "com.microsoft.exchange", color: "#d93025", visible: true },
+            { id: "3", name: "Holidays", account: "Phone", type: "LOCAL", color: "#34a853", visible: false }]),
+        events: (b, e, ids) => {
+            const t0 = new Date(); t0.setHours(0, 0, 0, 0);
+            const at = (dd, h, m) => new Date(t0.getFullYear(), t0.getMonth(), t0.getDate() + dd, h, m).getTime();
+            const utc = (dd) => Date.UTC(t0.getFullYear(), t0.getMonth(), t0.getDate() + dd);
+            return JSON.stringify([
+                { id: 1, title: "Team stand-up", begin: at(0, 9, 0), end: at(0, 9, 15), allDay: false, location: "Teams", cal: "2" },
+                { id: 2, title: "Lunch with Anna", begin: at(0, 12, 30), end: at(0, 14, 0), allDay: false, location: "Café Central", cal: "1" },
+                { id: 3, title: "Dentist", begin: at(1, 15, 0), end: at(1, 16, 0), allDay: false, location: "", cal: "1" },
+                { id: 4, title: "Conference", begin: utc(2), end: utc(4), allDay: true, location: "Brussels", cal: "2" }]);
+        },
+        openEvent: (id, b, e) => { window.__lastEvent = id; },
+        hasLocationAccess: () => localStorage.getItem("mock-loc") === "1",
+        requestLocation: (id) => { localStorage.setItem("mock-loc", "1"); setTimeout(() => window.__nativeResult(id, '{"granted":true,"lat":50.85,"lon":4.35,"place":"Brussels"}'), 80); }
     };
 })();

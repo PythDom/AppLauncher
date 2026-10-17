@@ -1,12 +1,23 @@
 package org.pythdom.applauncher;
 
+import android.Manifest;
 import android.app.Activity;
 import android.app.AppOpsManager;
 import android.app.usage.UsageStats;
 import android.app.usage.UsageStatsManager;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.ContentUris;
 import android.content.Context;
+import android.database.Cursor;
+import android.location.Address;
+import android.location.Geocoder;
+import android.location.Location;
+import android.location.LocationListener;
+import android.location.LocationManager;
+import android.os.Handler;
+import android.os.Looper;
+import android.provider.CalendarContract;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
@@ -49,6 +60,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -64,7 +76,12 @@ public class MainActivity extends Activity {
     private static final String HOST = "app.local";
     private static final String HOME_URL = "https://" + HOST + "/index.html";
     private static final int REQ_FILE = 1;
+    private static final int REQ_CAL = 2;
+    private static final int REQ_LOC = 3;
     private static final int ICON_PX = 144;
+
+    private int pendingCalId = -1;
+    private int pendingLocId = -1;
 
     private WebView web;
     private FrameLayout root;
@@ -217,6 +234,106 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             return null;
         }
+    }
+
+    /** Answer to a request the page made through window.Android (see __nativeResult in app.js). */
+    void nativeResult(int id, String json) {
+        final String js = "window.__nativeResult(" + id + "," + JSONObject.quote(json) + ")";
+        runOnUiThread(() -> web.evaluateJavascript(js, null));
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int code, String[] perms, int[] res) {
+        boolean ok = res.length > 0 && res[0] == PackageManager.PERMISSION_GRANTED;
+        if (code == REQ_CAL && pendingCalId >= 0) {
+            int id = pendingCalId;
+            pendingCalId = -1;
+            nativeResult(id, "{\"granted\":" + ok + "}");
+        } else if (code == REQ_LOC && pendingLocId >= 0) {
+            int id = pendingLocId;
+            pendingLocId = -1;
+            if (ok) locate(id); else nativeResult(id, "{\"granted\":false}");
+        } else {
+            super.onRequestPermissionsResult(code, perms, res);
+        }
+    }
+
+    /** Approximate position: a recent last-known fix, else one network fix (20 s limit). */
+    private void locate(final int id) {
+        final LocationManager lm = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
+        Location best = null;
+        try {
+            for (String p : lm.getProviders(true)) {
+                Location l = lm.getLastKnownLocation(p);
+                if (l != null && (best == null || l.getTime() > best.getTime())) best = l;
+            }
+        } catch (SecurityException e) {
+            nativeResult(id, "{\"granted\":false}");
+            return;
+        }
+        final Location last = best;
+        if (last != null && System.currentTimeMillis() - last.getTime() < 3L * 3600 * 1000) {
+            deliverLocation(id, last);
+            return;
+        }
+        if (!lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+            if (last != null) deliverLocation(id, last);
+            else nativeResult(id, "{\"granted\":true,\"error\":\"Location is switched off in Android settings\"}");
+            return;
+        }
+        final Handler h = new Handler(Looper.getMainLooper());
+        final boolean[] done = {false};
+        final LocationListener ll = new LocationListener() {
+            @Override public void onLocationChanged(Location l) {
+                if (done[0]) return;
+                done[0] = true;
+                lm.removeUpdates(this);
+                deliverLocation(id, l);
+            }
+            @Override public void onStatusChanged(String provider, int status, Bundle extras) { }
+            @Override public void onProviderEnabled(String provider) { }
+            @Override public void onProviderDisabled(String provider) { }
+        };
+        try {
+            lm.requestSingleUpdate(LocationManager.NETWORK_PROVIDER, ll, Looper.getMainLooper());
+        } catch (SecurityException e) {
+            nativeResult(id, "{\"granted\":false}");
+            return;
+        }
+        h.postDelayed(() -> {
+            if (done[0]) return;
+            done[0] = true;
+            lm.removeUpdates(ll);
+            if (last != null) deliverLocation(id, last);
+            else nativeResult(id, "{\"granted\":true,\"error\":\"No location fix yet. Try again in a moment.\"}");
+        }, 20000);
+    }
+
+    private void deliverLocation(final int id, final Location l) {
+        new Thread(() -> {
+            String place = "";
+            try {
+                if (Geocoder.isPresent()) {
+                    List<Address> a = new Geocoder(MainActivity.this, Locale.getDefault()).getFromLocation(l.getLatitude(), l.getLongitude(), 1);
+                    if (a != null && !a.isEmpty()) {
+                        Address ad = a.get(0);
+                        place = ad.getLocality() != null ? ad.getLocality() : (ad.getSubAdminArea() != null ? ad.getSubAdminArea() : "");
+                    }
+                }
+            } catch (Exception e) {
+                // no geocoder service: the page names the place from the time zone instead
+            }
+            JSONObject o = new JSONObject();
+            try {
+                o.put("granted", true);
+                o.put("lat", l.getLatitude());
+                o.put("lon", l.getLongitude());
+                o.put("place", place);
+            } catch (Exception e) {
+                // ignore
+            }
+            nativeResult(id, o.toString());
+        }).start();
     }
 
     @Override
@@ -489,6 +606,180 @@ public class MainActivity extends Activity {
                 final String js = "window.__httpResult(" + id + "," + status + "," + JSONObject.quote(text) + ")";
                 runOnUiThread(() -> web.evaluateJavascript(js, null));
             }).start();
+        }
+
+        /** Async GET (weather, calendar feeds); follows redirects, even http<->https. Result via window.__httpResult. */
+        @JavascriptInterface
+        public void httpGet(final int id, final String startUrl) {
+            new Thread(() -> {
+                int status = 0;
+                String text;
+                HttpURLConnection c = null;
+                try {
+                    String url = startUrl;
+                    for (int hop = 0; hop < 5; hop++) {
+                        c = (HttpURLConnection) new URL(url).openConnection();
+                        c.setRequestMethod("GET");
+                        c.setConnectTimeout(15000);
+                        c.setReadTimeout(30000);
+                        c.setInstanceFollowRedirects(false);
+                        c.setRequestProperty("User-Agent", "AppLauncher/1.0");
+                        c.setRequestProperty("Accept", "*/*");
+                        status = c.getResponseCode();
+                        if (status >= 300 && status < 400 && c.getHeaderField("Location") != null) {
+                            url = new URL(new URL(url), c.getHeaderField("Location")).toString();
+                            c.disconnect();
+                            continue;
+                        }
+                        break;
+                    }
+                    InputStream in = status >= 400 ? c.getErrorStream() : c.getInputStream();
+                    text = in == null ? "" : new String(readAll(in), StandardCharsets.UTF_8);
+                } catch (Exception e) {
+                    status = 0;
+                    text = String.valueOf(e.getMessage() != null ? e.getMessage() : e);
+                } finally {
+                    if (c != null) c.disconnect();
+                }
+                final String js = "window.__httpResult(" + id + "," + status + "," + JSONObject.quote(text) + ")";
+                runOnUiThread(() -> web.evaluateJavascript(js, null));
+            }).start();
+        }
+
+        // ---- device calendar (any account on the phone: Google, Samsung, Outlook/Exchange...) ----
+
+        @JavascriptInterface
+        public boolean hasCalendarAccess() {
+            return checkSelfPermission(Manifest.permission.READ_CALENDAR) == PackageManager.PERMISSION_GRANTED;
+        }
+
+        @JavascriptInterface
+        public void requestCalendarAccess(final int id) {
+            runOnUiThread(() -> {
+                if (hasCalendarAccess()) {
+                    nativeResult(id, "{\"granted\":true}");
+                } else {
+                    pendingCalId = id;
+                    requestPermissions(new String[]{Manifest.permission.READ_CALENDAR}, REQ_CAL);
+                }
+            });
+        }
+
+        /** [{id, name, account, type, color, visible}] */
+        @JavascriptInterface
+        public String calendars() {
+            JSONArray arr = new JSONArray();
+            if (!hasCalendarAccess()) return arr.toString();
+            String[] proj = {CalendarContract.Calendars._ID, CalendarContract.Calendars.CALENDAR_DISPLAY_NAME,
+                    CalendarContract.Calendars.ACCOUNT_NAME, CalendarContract.Calendars.ACCOUNT_TYPE,
+                    CalendarContract.Calendars.CALENDAR_COLOR, CalendarContract.Calendars.VISIBLE};
+            try (Cursor c = getContentResolver().query(CalendarContract.Calendars.CONTENT_URI, proj, null, null,
+                    CalendarContract.Calendars.ACCOUNT_NAME + ", " + CalendarContract.Calendars.CALENDAR_DISPLAY_NAME)) {
+                while (c != null && c.moveToNext()) {
+                    JSONObject o = new JSONObject();
+                    o.put("id", String.valueOf(c.getLong(0)));
+                    o.put("name", c.getString(1));
+                    o.put("account", c.getString(2));
+                    o.put("type", c.getString(3));
+                    o.put("color", String.format(Locale.US, "#%06X", 0xFFFFFF & c.getInt(4)));
+                    o.put("visible", c.getInt(5) != 0);
+                    arr.put(o);
+                }
+            } catch (Exception e) {
+                // permission revoked meanwhile or provider missing: empty list
+            }
+            return arr.toString();
+        }
+
+        /** Event instances in [begin, end) as [{id, title, begin, end, allDay, location, cal}]. idsJson: JSON array of calendar ids, or "null" for all. */
+        @JavascriptInterface
+        public String events(double begin, double end, String idsJson) {
+            JSONArray arr = new JSONArray();
+            if (!hasCalendarAccess()) return arr.toString();
+            Set<String> ids = null;
+            try {
+                if (idsJson != null && idsJson.startsWith("[")) {
+                    JSONArray ja = new JSONArray(idsJson);
+                    ids = new HashSet<>();
+                    for (int i = 0; i < ja.length(); i++) ids.add(String.valueOf(ja.get(i)));
+                }
+            } catch (Exception e) {
+                ids = null;
+            }
+            Uri.Builder b = CalendarContract.Instances.CONTENT_URI.buildUpon();
+            ContentUris.appendId(b, (long) begin);
+            ContentUris.appendId(b, (long) end);
+            String[] full = {"event_id", "title", "begin", "end", "allDay", "eventLocation", "calendar_id", "selfAttendeeStatus", "eventStatus"};
+            String[] basic = {"event_id", "title", "begin", "end", "allDay", "eventLocation", "calendar_id"};
+            Cursor c;
+            boolean extra = true;
+            try {
+                c = getContentResolver().query(b.build(), full, null, null, "begin ASC");
+            } catch (Exception e) {
+                extra = false;
+                try {
+                    c = getContentResolver().query(b.build(), basic, null, null, "begin ASC");
+                } catch (Exception e2) {
+                    return arr.toString();
+                }
+            }
+            try {
+                while (c != null && c.moveToNext() && arr.length() < 400) {
+                    String cal = String.valueOf(c.getLong(6));
+                    if (ids != null && !ids.contains(cal)) continue;
+                    if (extra && (c.getInt(7) == 2 /* declined */ || c.getInt(8) == 2 /* cancelled */)) continue;
+                    JSONObject o = new JSONObject();
+                    o.put("id", c.getLong(0));
+                    o.put("title", c.getString(1));
+                    o.put("begin", c.getLong(2));
+                    o.put("end", c.getLong(3));
+                    o.put("allDay", c.getInt(4) != 0);
+                    o.put("location", c.getString(5));
+                    o.put("cal", cal);
+                    arr.put(o);
+                }
+            } catch (Exception e) {
+                // return what we have
+            } finally {
+                if (c != null) c.close();
+            }
+            return arr.toString();
+        }
+
+        @JavascriptInterface
+        public void openEvent(final double eventId, final double begin, final double end) {
+            runOnUiThread(() -> {
+                try {
+                    Intent i = new Intent(Intent.ACTION_VIEW)
+                            .setData(ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, (long) eventId))
+                            .putExtra(CalendarContract.EXTRA_EVENT_BEGIN_TIME, (long) begin)
+                            .putExtra(CalendarContract.EXTRA_EVENT_END_TIME, (long) end)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(i);
+                } catch (Exception e) {
+                    Toast.makeText(MainActivity.this, "Cannot open this event", Toast.LENGTH_SHORT).show();
+                }
+            });
+        }
+
+        // ---- approximate location (for the weather) ----
+
+        @JavascriptInterface
+        public boolean hasLocationAccess() {
+            return checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED;
+        }
+
+        /** Answers through __nativeResult with {granted, lat, lon, place} or {granted, error}. */
+        @JavascriptInterface
+        public void requestLocation(final int id) {
+            runOnUiThread(() -> {
+                if (hasLocationAccess()) {
+                    locate(id);
+                } else {
+                    pendingLocId = id;
+                    requestPermissions(new String[]{Manifest.permission.ACCESS_COARSE_LOCATION}, REQ_LOC);
+                }
+            });
         }
     }
 }

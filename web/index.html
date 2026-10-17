@@ -81,6 +81,41 @@ header button { width: 40px; height: 40px; font-size: 20px; border-radius: 50%; 
 .tile:active { background: var(--line); }
 .tile.sel { background: color-mix(in srgb, var(--accent) 28%, transparent); outline: 2px solid var(--accent); }
 
+/* dashboard: time / agenda / weather */
+.wcard { margin: 8px 0; padding: 6px 10px 10px; background: var(--card); border: 1px solid var(--line); border-radius: 22px;
+         box-shadow: 0 1px 3px rgba(0,0,0,.10); }
+.wh { display: flex; align-items: center; gap: 8px; padding: 6px 2px 4px; }
+.wh .wt { flex: 1; font-size: 15px; font-weight: 700; }
+.wh button { width: 34px; height: 34px; padding: 0; font-size: 18px; border-radius: 50%; border: 1px solid var(--line);
+             background: var(--tile); color: var(--text); }
+.zones { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
+.zone { padding: 7px 10px; border-radius: 14px; background: var(--tile); border: 1px solid var(--line); min-width: 0; }
+.zone.here { border-color: var(--accent); }
+.zc { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.zt { font-size: 26px; font-weight: 700; line-height: 1.15; font-variant-numeric: tabular-nums; }
+.zd { font-size: 11px; color: var(--muted); }
+.agd { font-size: 12px; font-weight: 700; color: var(--accent); padding: 8px 2px 3px; text-transform: uppercase; letter-spacing: .4px; }
+.age { display: flex; gap: 10px; padding: 7px 8px; margin: 3px 0; border-left: 4px solid var(--accent); border-radius: 8px;
+       background: var(--tile); user-select: none; -webkit-user-select: none; }
+.age:active { background: var(--line); }
+.age.now { outline: 1.5px solid var(--accent); }
+.age.past { opacity: .5; }
+.aget { flex: 0 0 76px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; padding-top: 2px; }
+.agx { flex: 1; min-width: 0; }
+.agtt { font-size: 15px; line-height: 1.25; word-break: break-word; }
+.agl { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wnote { font-size: 11px; color: var(--muted); padding: 8px 2px 0; white-space: pre-wrap; }
+.wxcur { display: flex; align-items: center; gap: 14px; padding: 2px 2px 6px; flex-wrap: wrap; }
+.wxbig { font-size: 34px; font-weight: 700; white-space: nowrap; }
+.wxdet { font-size: 13px; color: var(--muted); white-space: pre-line; line-height: 1.5; }
+.wxhours { display: flex; gap: 4px; overflow-x: auto; padding: 4px 0 8px; scrollbar-width: none; }
+.wxh { flex: 0 0 auto; width: 48px; text-align: center; font-size: 12px; padding: 5px 0; border-radius: 12px; background: var(--tile); }
+.wxh div:nth-child(2) { font-size: 18px; }
+.wxp { color: var(--accent); font-size: 11px; min-height: 14px; }
+.wxd { display: flex; gap: 8px; align-items: center; padding: 5px 4px; border-top: 1px solid var(--line); font-size: 14px; }
+.wxc0 { flex: 0 0 62px; } .wxc1 { flex: 0 0 28px; font-size: 18px; } .wxc2 { flex: 1; font-size: 12px; color: var(--accent); }
+.wxc3 { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+
 #results { position: absolute; left: 0; right: 0; top: 58px; bottom: 0; background: var(--bg); overflow-y: auto;
            padding: 8px 10px 90px; z-index: 5; }
 #results[hidden] { display: none; }
@@ -98,7 +133,7 @@ header button { width: 40px; height: 40px; font-size: 20px; border-radius: 50%; 
 #overlay.open { display: flex; }
 .card { width: 100%; max-width: 560px; max-height: 88vh; overflow-y: auto; background: var(--card);
         border-radius: 18px 18px 0 0; padding: 14px 14px 18px; }
-.card h3 { margin: 2px 4px 10px; font-size: 17px; }
+.card h3 { margin: 2px 4px 10px; font-size: 17px; white-space: pre-line; }
 .card label { display: block; font-size: 13px; color: var(--muted); margin: 10px 2px 0; }
 .card label.chk { display: flex; align-items: center; gap: 10px; color: var(--text); font-size: 15px; }
 .card input[type=text], .card input[type=url], .card input[type=password], .card select, .card textarea {
@@ -130,10 +165,11 @@ header button { width: 40px; height: 40px; font-size: 20px; border-radius: 50%; 
   </header>
   <div id="pager">
     <section class="page" id="pageCloud"></section>
+    <section class="page" id="pageDash"></section>
     <section class="page" id="page0"></section>
     <section class="page" id="page1"></section>
   </div>
-  <div id="dots"><button data-p="0" aria-label="Keyword cloud"></button><button class="on" data-p="1" aria-label="Main screen"></button><button data-p="2" aria-label="Most used list"></button></div>
+  <div id="dots"><button data-p="0" aria-label="Keyword cloud"></button><button class="on" data-p="1" aria-label="Dashboard"></button><button data-p="2" aria-label="Categories"></button><button data-p="3" aria-label="Most used list"></button></div>
   <div id="results" hidden></div>
   <div id="selbar" hidden>
     <span class="n" id="seln"></span>
@@ -145,6 +181,7 @@ header button { width: 40px; height: 40px; font-size: 20px; border-radius: 50%; 
 <div id="overlay"></div>
 <div id="toast"></div>
 <script src="mock.js"></script>
+<script src="ics.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

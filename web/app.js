@@ -806,6 +806,7 @@ function render() {
     renderCloud($("pageCloud"));
     renderMain($("page0"));
     renderUsage($("page1"));
+    renderDash($("pageDash"));
     renderSelectBar();
     renderResults();
 }
@@ -1246,6 +1247,8 @@ function mainMenu() {
         { label: "Improve search with AI…", run: aiIndexDialog },
         { label: "Select several…", run: () => enterSelect(null) },
         { label: state.mainView === "cloud" ? "Show categories as cards" : "Show categories as a word cloud", run: () => { state.mainView = state.mainView === "cloud" ? "cards" : "cloud"; mainSel = null; commit(); } },
+        { label: state.startPage === "main" ? "Home button opens: categories → switch to dashboard" : "Home button opens: dashboard → switch to categories",
+            run: () => { state.startPage = state.startPage === "main" ? "dash" : "main"; save(); toast("Home now opens the " + (state.startPage === "main" ? "categories" : "dashboard")); } },
         { label: "Import old Launcher shortcuts", run: () => importLegacy(false) },
         { label: "Rescan installed apps", run: () => { const r = reconcile(); commit(); toast(r.added + " new, " + r.removed + " removed"); } },
         { label: "Settings & backup…", run: settingsMenu }
@@ -1765,15 +1768,18 @@ function goPage(n, smooth) {
     p.scrollTo({ left: n * p.clientWidth, behavior: smooth ? "smooth" : "auto" });
 }
 
-// Screens, in swipe order: 0 keyword cloud | 1 main (home) | 2 most-used list.
-const PAGE_CLOUD = 0, PAGE_MAIN = 1, PAGE_USAGE = 2;
-let lastPage = PAGE_MAIN;
+// Screens, in swipe order: 0 keyword cloud | 1 dashboard | 2 categories | 3 most-used list.
+const PAGE_CLOUD = 0, PAGE_DASH = 1, PAGE_MAIN = 2, PAGE_USAGE = 3;
+// "Home" (the Home button, first start) goes to the dashboard unless the user chose the categories.
+const homePage = () => (state && state.startPage === "main" ? PAGE_MAIN : PAGE_DASH);
+let lastPage = PAGE_DASH;
 function updateDots() {
     const cur = pagerPage();
     document.querySelectorAll("#dots button").forEach((b) => b.classList.toggle("on", Number(b.dataset.p) === cur));
     if (cur === lastPage) return;
     if (cur === PAGE_USAGE) { refreshUsage(); renderUsage($("page1")); }       // fresh ranking each time it is opened
     if (cur === PAGE_CLOUD) { refreshUsage(); renderCloud($("pageCloud")); }   // word sizes follow current usage
+    if (cur === PAGE_DASH) refreshDash(false);                                 // clocks, agenda, weather up to date
     if (lastPage === PAGE_CLOUD && cloudSel) { cloudSel = null; renderCloud($("pageCloud")); }   // leave it on the cloud itself
     lastPage = cur;
 }
@@ -1784,7 +1790,7 @@ window.__launcherBack = function () {
     if ($("q").value) { $("q").value = ""; renderResults(); return true; }
     if (cloudSel && pagerPage() === PAGE_CLOUD) { cloudSel = null; renderCloud($("pageCloud")); return true; }
     if (mainSel && pagerPage() === PAGE_MAIN) { mainSel = null; renderMain($("page0")); return true; }
-    if (pagerPage() !== PAGE_MAIN) { goPage(PAGE_MAIN, true); return true; }
+    if (pagerPage() !== homePage()) { goPage(homePage(), true); return true; }
     return false;
 };
 
@@ -1795,7 +1801,7 @@ window.__onHome = function () {
     $("q").blur();
     renderResults();
     if (mainSel) { mainSel = null; renderMain($("page0")); }
-    goPage(PAGE_MAIN, true);
+    goPage(homePage(), true);
 };
 
 window.__onResume = function () {
@@ -1808,9 +1814,579 @@ window.__onResume = function () {
     } else {
         renderUsage($("page1"));
     }
+    if (pagerPage() === PAGE_DASH) refreshDash(false);
 };
 
 window.__onPause = flush;
+
+// ==================================================================== Dashboard screen ====
+// Top: clocks for six time zones. Middle: agenda. Bottom: weather.
+
+const nativePending = {};
+let nativeSeq = 1000;
+window.__nativeResult = function (id, json) {
+    const p = nativePending[id];
+    if (!p) return;
+    delete nativePending[id];
+    let v = {};
+    try { v = JSON.parse(json); } catch (e) { /* keep {} */ }
+    p(v);
+};
+
+// Android shows one permission dialog at a time (a second request is dropped), so calls run one after another.
+let nativeChain = Promise.resolve();
+function nativeCall(fn, ...args) {
+    const run = () => new Promise((resolve) => {
+        const id = ++nativeSeq;
+        nativePending[id] = resolve;
+        try { A[fn](id, ...args); }
+        catch (e) { delete nativePending[id]; resolve({ error: String(e) }); }
+    });
+    const p = nativeChain.then(run);
+    nativeChain = p.catch(() => {});
+    return p;
+}
+
+function httpGet(url) {
+    return new Promise((resolve) => {
+        const id = ++httpSeq;
+        pending[id] = { resolve };
+        try { A.httpGet(id, url); }
+        catch (e) { delete pending[id]; resolve({ status: 0, text: String(e) }); }
+    });
+}
+
+const DAY = 86400000;
+const hhmm = (ms) => new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(new Date(ms));
+
+function dashCard(title, buttons) {
+    const c = document.createElement("div");
+    c.className = "wcard";
+    const h = document.createElement("div");
+    h.className = "wh";
+    const t = document.createElement("span");
+    t.className = "wt";
+    t.textContent = title;
+    h.appendChild(t);
+    (buttons || []).forEach((b) => {
+        const x = document.createElement("button");
+        x.textContent = b[0];
+        x.title = b[2] || "";
+        x.onclick = b[1];
+        h.appendChild(x);
+    });
+    const body = document.createElement("div");
+    c.append(h, body);
+    return { card: c, body, title: t };
+}
+
+// ---------------------------------------------------------------- time ----
+
+const DEFAULT_ZONES = [
+    { label: "Seattle", tz: "America/Los_Angeles" }, { label: "St. Louis", tz: "America/Chicago" },
+    { label: "Montréal", tz: "America/Toronto" }, { label: "São Paulo", tz: "America/Sao_Paulo" },
+    { label: "Istanbul", tz: "Europe/Istanbul" }
+];
+
+const CITIES = [["Seattle", "America/Los_Angeles"], ["Vancouver", "America/Vancouver"], ["San Francisco", "America/Los_Angeles"],
+    ["Denver", "America/Denver"], ["St. Louis", "America/Chicago"], ["Chicago", "America/Chicago"], ["Mexico City", "America/Mexico_City"],
+    ["New York", "America/New_York"], ["Montréal", "America/Toronto"], ["Toronto", "America/Toronto"], ["Bogotá", "America/Bogota"],
+    ["Lima", "America/Lima"], ["Santiago", "America/Santiago"], ["Buenos Aires", "America/Argentina/Buenos_Aires"], ["São Paulo", "America/Sao_Paulo"],
+    ["Anchorage", "America/Anchorage"], ["Honolulu", "Pacific/Honolulu"], ["Reykjavik", "Atlantic/Reykjavik"], ["London", "Europe/London"],
+    ["Dublin", "Europe/Dublin"], ["Lisbon", "Europe/Lisbon"], ["Paris", "Europe/Paris"], ["Brussels", "Europe/Brussels"], ["Amsterdam", "Europe/Amsterdam"],
+    ["Berlin", "Europe/Berlin"], ["Rome", "Europe/Rome"], ["Madrid", "Europe/Madrid"], ["Zurich", "Europe/Zurich"], ["Stockholm", "Europe/Stockholm"],
+    ["Warsaw", "Europe/Warsaw"], ["Athens", "Europe/Athens"], ["Helsinki", "Europe/Helsinki"], ["Kyiv", "Europe/Kiev"], ["Istanbul", "Europe/Istanbul"],
+    ["Moscow", "Europe/Moscow"], ["Cairo", "Africa/Cairo"], ["Nairobi", "Africa/Nairobi"], ["Lagos", "Africa/Lagos"], ["Johannesburg", "Africa/Johannesburg"],
+    ["Tel Aviv", "Asia/Jerusalem"], ["Dubai", "Asia/Dubai"], ["Tehran", "Asia/Tehran"], ["Karachi", "Asia/Karachi"], ["Delhi", "Asia/Kolkata"],
+    ["Dhaka", "Asia/Dhaka"], ["Bangkok", "Asia/Bangkok"], ["Singapore", "Asia/Singapore"], ["Hong Kong", "Asia/Hong_Kong"], ["Shanghai", "Asia/Shanghai"],
+    ["Tokyo", "Asia/Tokyo"], ["Seoul", "Asia/Seoul"], ["Sydney", "Australia/Sydney"], ["Perth", "Australia/Perth"], ["Auckland", "Pacific/Auckland"], ["UTC", "UTC"]];
+
+const localTz = () => Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+const cityOfTz = (tz) => (String(tz).split("/").pop() || tz).replace(/_/g, " ");
+
+function zoneList() {
+    const mine = [{ label: cityOfTz(localTz()), tz: localTz(), here: true }];
+    return mine.concat(state.zones && state.zones.length === 5 ? state.zones : DEFAULT_ZONES);
+}
+
+function zoneParts(tz, now) {
+    const o = {};
+    new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric", month: "numeric", day: "numeric", hour: "numeric", hourCycle: "h23" })
+        .formatToParts(now).forEach((p) => { o[p.type] = +p.value; });
+    return o;
+}
+
+function renderTime(body) {
+    body.innerHTML = "";
+    const now = new Date();
+    const mine = zoneParts(localTz(), now);
+    const grid = document.createElement("div");
+    grid.className = "zones";
+    zoneList().forEach((z) => {
+        const p = zoneParts(z.tz, now);
+        const diff = Math.round((Date.UTC(p.year, p.month - 1, p.day) - Date.UTC(mine.year, mine.month - 1, mine.day)) / DAY);
+        const d = document.createElement("div");
+        d.className = "zone" + (z.here ? " here" : "");
+        const city = document.createElement("div");
+        city.className = "zc";
+        city.textContent = (p.hour >= 7 && p.hour < 19 ? "☀️ " : "🌙 ") + (z.here ? "Here · " : "") + z.label;
+        const tm = document.createElement("div");
+        tm.className = "zt";
+        tm.textContent = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", timeZone: z.tz }).format(now);
+        const dt = document.createElement("div");
+        dt.className = "zd";
+        dt.textContent = new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric", month: "short", timeZone: z.tz }).format(now) +
+            (diff ? "  ·  " + (diff > 0 ? "+" : "") + diff + " d" : "");
+        d.append(city, tm, dt);
+        grid.appendChild(d);
+    });
+    body.appendChild(grid);
+}
+
+function editZones() {
+    const cur = state.zones && state.zones.length === 5 ? state.zones : DEFAULT_ZONES;
+    const options = CITIES.map((c) => ({ value: c[1] + "|" + c[0], label: c[0] + "  (" + c[1].split("/")[0] + ")" }));
+    const fields = cur.map((z, n) => {
+        const v = z.tz + "|" + z.label;
+        if (!options.some((o) => o.value === v)) options.unshift({ value: v, label: z.label });
+        return { id: "z" + n, label: "Zone " + (n + 1), type: "select", options, value: v };
+    });
+    form("Time zones (the first clock is always your own)", fields, "Save", (v) => {
+        state.zones = [0, 1, 2, 3, 4].map((n) => { const [tz, label] = v["z" + n].split("|"); return { tz, label }; });
+        commit();
+    });
+}
+
+// -------------------------------------------------------------- agenda ----
+
+const agenda = { items: [], perm: null, note: "", at: 0 };
+const feedCache = {};
+
+const hasCalApi = () => typeof A.hasCalendarAccess === "function";
+const hasLocApi = () => typeof A.requestLocation === "function";
+
+function acctKind(c) {
+    const t = ((c.type || "") + " " + (c.account || "")).toLowerCase();
+    if (/outlook|exchange|microsoft|office|hotmail|live\.com/.test(t)) return "Outlook";
+    if (/google|gmail/.test(t)) return "Google";
+    if (/samsung|local|device|android\.calendar/.test(t)) return "Phone";
+    return c.account || "Other";
+}
+
+function devCalendars() {
+    try { return JSON.parse(A.calendars()); } catch (e) { return []; }
+}
+
+function agendaWindow() {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    return [d.getTime(), new Date(d.getFullYear(), d.getMonth(), d.getDate() + 7).getTime()];
+}
+
+async function icsText(f, force) {
+    const c = feedCache[f.id];
+    if (c && !force && Date.now() - c.t < 30 * 60000) return c.text;
+    const url = f.url.replace(/^webcal:/i, "https:");
+    const r = await httpGet(url);
+    if (r.status !== 200) throw new Error(r.status ? "HTTP " + r.status : "no connection");
+    if (!/BEGIN:VCALENDAR/i.test(r.text)) throw new Error("not a calendar link");
+    feedCache[f.id] = { t: Date.now(), text: r.text };
+    return r.text;
+}
+
+async function loadAgenda(force) {
+    const [from, to] = agendaWindow();
+    const items = [];
+    const notes = [];
+    if (hasCalApi()) {
+        if (!A.hasCalendarAccess() && !state.askedCal) {
+            state.askedCal = true;
+            save();
+            await nativeCall("requestCalendarAccess");
+        }
+        agenda.perm = !!A.hasCalendarAccess();
+        if (agenda.perm) {
+            const cals = devCalendars();
+            const byId = new Map(cals.map((c) => [c.id, c]));
+            const ids = state.calSel ? state.calSel : cals.filter((c) => c.visible).map((c) => c.id);
+            let evs = [];
+            try { evs = JSON.parse(A.events(from, to, JSON.stringify(ids))); } catch (e) { /* none */ }
+            for (const e of evs) {
+                let b = e.begin, en = e.end;
+                if (e.allDay) {   // the calendar stores all-day events as UTC midnights
+                    const d0 = new Date(b), d1 = new Date(en);
+                    b = new Date(d0.getUTCFullYear(), d0.getUTCMonth(), d0.getUTCDate()).getTime();
+                    en = new Date(d1.getUTCFullYear(), d1.getUTCMonth(), d1.getUTCDate()).getTime();
+                    if (en <= b) en = b + DAY;
+                }
+                const c = byId.get(e.cal) || {};
+                items.push({ title: e.title || "(no title)", begin: b, end: en, allDay: !!e.allDay, location: e.location || "",
+                    color: c.color || "#1a73e8", cal: c.name || "", dev: { id: e.id, begin: e.begin, end: e.end } });
+            }
+        }
+    }
+    for (const f of state.icsFeeds || []) {
+        try {
+            const text = await icsText(f, force);
+            window.Ics.parse(text, from, to, 300).forEach((e) => items.push({ title: e.title, begin: e.begin, end: e.end, allDay: e.allDay,
+                location: e.location, color: f.color || "#34a853", cal: f.name }));
+        } catch (e) { notes.push("“" + f.name + "”: " + e.message); }
+    }
+    items.sort((a, b) => a.begin - b.begin || a.title.localeCompare(b.title));
+    agenda.items = items;
+    agenda.note = notes.join(" · ");
+    agenda.at = Date.now();
+    renderAgenda();
+}
+
+function eventSheet(e) {
+    const when = e.allDay ? "All day" : new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }).format(new Date(e.begin)) + " – " + hhmm(e.end);
+    const buttons = [];
+    if (e.dev) buttons.push({ label: "Open in Calendar", run: () => { try { A.openEvent(e.dev.id, e.dev.begin, e.dev.end); } catch (x) { /* ignore */ } } });
+    sheet(e.title + "\n" + when + (e.location ? "\n" + e.location : "") + (e.cal ? "\n(" + e.cal + ")" : ""), buttons);
+}
+
+function renderAgenda() {
+    const body = $("agendaBody");
+    if (!body) return;
+    body.innerHTML = "";
+    const [from] = agendaWindow();
+    const now = Date.now();
+    if (agenda.perm === false && !(state.icsFeeds || []).length) {
+        const e = document.createElement("div");
+        e.className = "empty";
+        e.textContent = "Allow calendar access to see your events here (Google, Samsung, Outlook accounts on this phone).";
+        const b = document.createElement("button");
+        b.className = "ask";
+        b.textContent = "Allow calendar access";
+        b.onclick = async () => { await nativeCall("requestCalendarAccess"); loadAgenda(true); };
+        body.append(e, b);
+        return;
+    }
+    let shown = 0;
+    for (let n = 0; n < 7; n++) {
+        const ds = new Date(new Date(from).getFullYear(), new Date(from).getMonth(), new Date(from).getDate() + n).getTime();
+        const de = new Date(new Date(from).getFullYear(), new Date(from).getMonth(), new Date(from).getDate() + n + 1).getTime();
+        const list = agenda.items.filter((e) => e.begin < de && e.end > ds && (e.end > e.begin || e.begin >= ds));
+        if (!list.length) continue;
+        list.sort((a, b) => (b.allDay - a.allDay) || a.begin - b.begin);
+        const h = document.createElement("div");
+        h.className = "agd";
+        h.textContent = n === 0 ? "Today" : n === 1 ? "Tomorrow" : new Intl.DateTimeFormat(undefined, { weekday: "long", day: "numeric", month: "short" }).format(new Date(ds));
+        body.appendChild(h);
+        for (const e of list) {
+            if (shown++ > 40) break;
+            const r = document.createElement("div");
+            const live = e.begin <= now && e.end > now && !e.allDay;
+            r.className = "age" + (live ? " now" : "") + (n === 0 && e.end <= now && !e.allDay ? " past" : "");
+            r.style.borderLeftColor = e.color;
+            const t = document.createElement("div");
+            t.className = "aget";
+            t.textContent = e.allDay ? "All day" : (e.begin < ds ? "…" : hhmm(e.begin)) + (e.end > e.begin ? "–" + (e.end > de ? "…" : hhmm(e.end)) : "");
+            const x = document.createElement("div");
+            x.className = "agx";
+            const tt = document.createElement("div");
+            tt.className = "agtt";
+            tt.textContent = e.title;
+            x.appendChild(tt);
+            if (e.location) {
+                const lc = document.createElement("div");
+                lc.className = "agl";
+                lc.textContent = e.location;
+                x.appendChild(lc);
+            }
+            r.append(t, x);
+            attachPress(r, () => (e.dev ? A.openEvent(e.dev.id, e.dev.begin, e.dev.end) : eventSheet(e)), () => eventSheet(e));
+            body.appendChild(r);
+        }
+    }
+    if (!shown) {
+        const e = document.createElement("div");
+        e.className = "empty";
+        e.textContent = agenda.at ? "No events in the next 7 days." : "Loading…";
+        body.appendChild(e);
+    }
+    if (agenda.note) {
+        const n = document.createElement("div");
+        n.className = "wnote";
+        n.textContent = agenda.note;
+        body.appendChild(n);
+    }
+}
+
+function chooseCalendars() {
+    const cals = devCalendars();
+    if (!cals.length) { toast("No calendars found on this phone yet"); return; }
+    const chosen = new Set(state.calSel ? state.calSel : cals.filter((c) => c.visible).map((c) => c.id));
+    const fields = cals.map((c) => ({ id: "c" + c.id, label: acctKind(c) + " · " + c.name + (c.account && c.account !== c.name ? "  (" + c.account + ")" : ""), type: "checkbox", value: chosen.has(c.id) }));
+    form("Calendars shown in the agenda", fields, "Save", (v) => {
+        state.calSel = cals.filter((c) => v["c" + c.id]).map((c) => c.id);
+        save();
+        loadAgenda(true);
+    });
+}
+
+function addFeed() {
+    form("Add a calendar link", [
+        { id: "name", label: "Name", placeholder: "e.g. Work (Outlook)" },
+        { id: "url", label: "Calendar link (https://… or webcal://…, ending in .ics)", type: "url", placeholder: "https://outlook.live.com/owa/calendar/…/calendar.ics" }
+    ], "Add", (v) => {
+        const url = v.url.trim();
+        if (!/^(https?|webcal):\/\//i.test(url)) { toast("Paste a link starting with https:// or webcal://"); return false; }
+        state.icsFeeds = state.icsFeeds || [];
+        const colors = ["#0b84ff", "#34a853", "#f9ab00", "#d93025", "#a142f4", "#00acc1"];
+        state.icsFeeds.push({ id: "f" + uid(), name: v.name.trim() || "Calendar link", url, color: colors[state.icsFeeds.length % colors.length] });
+        save();
+        loadAgenda(true);
+        toast("Link added");
+    });
+}
+
+function manageFeeds() {
+    const feeds = state.icsFeeds || [];
+    if (!feeds.length) { toast("No calendar links yet"); return; }
+    sheet("Calendar links — tap to remove", feeds.map((f) => ({ label: f.name, sub: "remove", run: () => {
+        state.icsFeeds = state.icsFeeds.filter((x) => x.id !== f.id);
+        delete feedCache[f.id];
+        save();
+        loadAgenda(true);
+    } })));
+}
+
+function outlookHelp() {
+    resultCard("Getting Outlook into the agenda",
+        "Three ways, easiest first:",
+        "1) Add the account to Android (best): Settings → Accounts → Add account → Microsoft Exchange / Outlook.com (or Microsoft 365), and switch Calendar sync on. Its calendars then appear under “Choose device calendars” as Outlook.\n\n" +
+        "2) Outlook app: in its Settings, pick your account and turn on the option that syncs calendars to the phone’s calendar (wording varies by version).\n\n" +
+        "3) Calendar link (no sign-in, read-only, updates every few hours): in Outlook on the web → Settings → Calendar → Shared calendars → Publish a calendar → copy the ICS link, then use “Add a calendar link”.\n\n" +
+        "Google and Samsung calendars on the phone show up automatically.");
+}
+
+function agendaMenu() {
+    const buttons = [];
+    if (hasCalApi() && agenda.perm) buttons.push({ label: "Choose device calendars…", run: chooseCalendars });
+    if (hasCalApi() && !agenda.perm) buttons.push({ label: "Allow calendar access", run: async () => { await nativeCall("requestCalendarAccess"); loadAgenda(true); } });
+    buttons.push({ label: "Add a calendar link (ICS)…", run: addFeed });
+    if ((state.icsFeeds || []).length) buttons.push({ label: "Calendar links (" + state.icsFeeds.length + ")…", run: manageFeeds });
+    buttons.push({ label: "How to get Outlook here…", run: outlookHelp });
+    buttons.push({ label: "Refresh", run: () => loadAgenda(true) });
+    sheet("Agenda", buttons);
+}
+
+// ------------------------------------------------------------- weather ----
+
+const wxState = { note: "", denied: false, busy: false };
+
+function wmo(code, day) {
+    const c = Number(code);
+    if (c === 0) return day ? ["☀️", "Clear"] : ["🌙", "Clear"];
+    if (c === 1) return day ? ["🌤️", "Mostly clear"] : ["🌙", "Mostly clear"];
+    if (c === 2) return ["⛅", "Partly cloudy"];
+    if (c === 3) return ["☁️", "Overcast"];
+    if (c === 45 || c === 48) return ["🌫️", "Fog"];
+    if (c >= 51 && c <= 57) return ["🌦️", "Drizzle"];
+    if (c >= 61 && c <= 67) return ["🌧️", "Rain"];
+    if (c >= 71 && c <= 77) return ["❄️", "Snow"];
+    if (c >= 80 && c <= 82) return ["🌧️", "Showers"];
+    if (c === 85 || c === 86) return ["🌨️", "Snow showers"];
+    if (c >= 95) return ["⛈️", "Thunderstorm"];
+    return ["·", ""];
+}
+
+async function fetchForecast(loc) {
+    const imp = state.units === "imperial";
+    const url = "https://api.open-meteo.com/v1/forecast?latitude=" + loc.lat.toFixed(3) + "&longitude=" + loc.lon.toFixed(3) +
+        "&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m,is_day,precipitation" +
+        "&hourly=temperature_2m,precipitation_probability,weather_code,is_day" +
+        "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&forecast_days=6&timezone=auto" +
+        (imp ? "&temperature_unit=fahrenheit&wind_speed_unit=mph" : "");
+    let r = await httpGet(url);
+    if (r.status !== 200 && (r.status === 0 || r.status >= 500)) {   // one retry for a busy or just-woken network
+        await new Promise((ok) => setTimeout(ok, 1500));
+        r = await httpGet(url);
+    }
+    if (r.status !== 200) throw new Error(r.status ? "HTTP " + r.status : "no connection");
+    return JSON.parse(r.text);
+}
+
+async function loadWeather(force) {
+    if (wxState.busy) return;
+    const wx = state.wx;
+    const manual = state.weatherLoc || null;
+    const units = state.units || "metric";
+    const fresh = wx && !force && Date.now() - wx.t < 30 * 60000 && wx.units === units && !!wx.manual === !!manual &&
+        (!manual || (Math.abs(wx.lat - manual.lat) < 0.001 && Math.abs(wx.lon - manual.lon) < 0.001));
+    if (fresh) { renderWeather(); return; }
+    wxState.busy = true;
+    try {
+        let loc = manual;
+        if (!loc) {
+            if (!hasLocApi()) { wxState.note = "Location is only available in the Android app."; renderWeather(); return; }
+            if (!A.hasLocationAccess()) state.askedLoc = true;
+            const r = await nativeCall("requestLocation");
+            if (r.granted === false) { wxState.denied = true; wxState.note = "Location permission is off."; renderWeather(); return; }
+            wxState.denied = false;
+            if (r.error) { wxState.note = r.error; renderWeather(); return; }
+            loc = { lat: r.lat, lon: r.lon, place: r.place };
+        }
+        try {
+            const data = await fetchForecast(loc);
+            state.wx = { t: Date.now(), lat: loc.lat, lon: loc.lon, place: loc.place || cityOfTz(data.timezone || ""), manual: !!manual, units, data };
+            save();
+            wxState.note = "";
+        } catch (e) {
+            wxState.note = wx ? "Offline — showing the last update" : "Could not load the weather (" + e.message + ")";
+        }
+    } finally {
+        wxState.busy = false;
+    }
+    renderWeather();
+}
+
+function renderWeather() {
+    const body = $("wxBody");
+    if (!body) return;
+    body.innerHTML = "";
+    const wx = state.wx;
+    const t = $("wxTitle");
+    if (t) t.textContent = "Weather" + (wx ? " · " + wx.place : "");
+    if (!wx) {
+        const e = document.createElement("div");
+        e.className = "empty";
+        e.textContent = wxState.note || (wxState.busy ? "Finding your location…" : "Loading…");
+        body.appendChild(e);
+        if (wxState.denied || /location/i.test(wxState.note || "")) {
+            const b = document.createElement("button");
+            b.className = "ask";
+            b.textContent = "Allow location";
+            b.onclick = () => loadWeather(true);
+            const c = document.createElement("button");
+            c.className = "ask";
+            c.textContent = "Or set a city…";
+            c.onclick = setCity;
+            body.append(b, c);
+        }
+        return;
+    }
+    const d = wx.data;
+    const imp = wx.units === "imperial";
+    const deg = (v) => Math.round(v) + "°";
+    const cur = d.current;
+    const [icon, text] = wmo(cur.weather_code, cur.is_day);
+    const top = document.createElement("div");
+    top.className = "wxcur";
+    const big = document.createElement("div");
+    big.className = "wxbig";
+    big.textContent = icon + " " + deg(cur.temperature_2m) + (imp ? "F" : "C");
+    const det = document.createElement("div");
+    det.className = "wxdet";
+    det.textContent = text + " · feels " + deg(cur.apparent_temperature) + "\n" + "💨 " + Math.round(cur.wind_speed_10m) + (imp ? " mph" : " km/h") +
+        (d.daily ? "   ☔ " + (d.daily.precipitation_probability_max[0] || 0) + "%   ↑" + deg(d.daily.temperature_2m_max[0]) + " ↓" + deg(d.daily.temperature_2m_min[0]) : "");
+    top.append(big, det);
+    body.appendChild(top);
+
+    const times = d.hourly.time;
+    let i0 = times.findIndex((x) => x >= cur.time);
+    if (i0 < 0) i0 = 0;
+    const strip = document.createElement("div");
+    strip.className = "wxhours";
+    for (let i = i0; i < Math.min(times.length, i0 + 14); i++) {
+        const h = document.createElement("div");
+        h.className = "wxh";
+        const [ic] = wmo(d.hourly.weather_code[i], d.hourly.is_day ? d.hourly.is_day[i] : 1);
+        const pp = d.hourly.precipitation_probability ? d.hourly.precipitation_probability[i] : 0;
+        h.innerHTML = "";
+        [times[i].slice(11, 13) + "h", ic, deg(d.hourly.temperature_2m[i]), pp >= 20 ? pp + "%" : ""].forEach((s, n) => {
+            const x = document.createElement("div");
+            x.className = n === 3 ? "wxp" : "";
+            x.textContent = s;
+            h.appendChild(x);
+        });
+        strip.appendChild(h);
+    }
+    body.appendChild(strip);
+
+    const days = document.createElement("div");
+    days.className = "wxdays";
+    for (let i = 0; i < Math.min(d.daily.time.length, 6); i++) {
+        const r = document.createElement("div");
+        r.className = "wxd";
+        const [ic] = wmo(d.daily.weather_code[i], 1);
+        const name = i === 0 ? "Today" : new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric" }).format(new Date(d.daily.time[i] + "T12:00"));
+        const pp = d.daily.precipitation_probability_max[i];
+        [name, ic, pp >= 20 ? "☔ " + pp + "%" : "", deg(d.daily.temperature_2m_max[i]) + " / " + deg(d.daily.temperature_2m_min[i])].forEach((s, n) => {
+            const x = document.createElement("span");
+            x.className = "wxc" + n;
+            x.textContent = s;
+            r.appendChild(x);
+        });
+        days.appendChild(r);
+    }
+    body.appendChild(days);
+    const foot = document.createElement("div");
+    foot.className = "wnote";
+    foot.textContent = (wxState.note ? wxState.note + " · " : "") + "Updated " + hhmm(wx.t) + " · weather data by Open-Meteo.com";
+    body.appendChild(foot);
+}
+
+function setCity() {
+    form("Weather location", [{ id: "q", label: "City name", placeholder: "e.g. Brussels" }], "Search", (v) => {
+        const q = v.q.trim();
+        if (!q) return false;
+        setTimeout(async () => {
+            const r = await httpGet("https://geocoding-api.open-meteo.com/v1/search?name=" + encodeURIComponent(q) + "&count=6&language=en&format=json");
+            let res = [];
+            try { res = JSON.parse(r.text).results || []; } catch (e) { /* none */ }
+            if (!res.length) { toast(r.status === 200 ? "No city found" : "Could not search (offline?)"); return; }
+            sheet("Pick the city", res.map((c) => ({ label: c.name, sub: [c.admin1, c.country].filter(Boolean).join(", "), run: () => {
+                state.weatherLoc = { lat: c.latitude, lon: c.longitude, place: c.name };
+                commit();
+                loadWeather(true);
+            } })));
+        }, 0);
+    });
+}
+
+function weatherMenu() {
+    const buttons = [{ label: "Refresh now", run: () => loadWeather(true) }];
+    buttons.push({ label: "Units: " + (state.units === "imperial" ? "°F, mph → switch to °C, km/h" : "°C, km/h → switch to °F, mph"), run: () => {
+        state.units = state.units === "imperial" ? "metric" : "imperial"; save(); loadWeather(true);
+    } });
+    if (state.weatherLoc) buttons.push({ label: "Use my location automatically", run: () => { state.weatherLoc = null; save(); loadWeather(true); } });
+    buttons.push({ label: state.weatherLoc ? "Change city…" : "Set a city instead…", run: setCity });
+    sheet("Weather", buttons);
+}
+
+// ---------------------------------------------------------------- page ----
+
+function renderDash(el) {
+    el.innerHTML = "";
+    const time = dashCard("Time", [["⚙", editZones, "Choose the time zones"]]);
+    time.body.id = "timeBody";
+    const ag = dashCard("Agenda", [["⋯", agendaMenu, "Calendars and links"]]);
+    ag.body.id = "agendaBody";
+    const wx = dashCard("Weather", [["⋯", weatherMenu, "Weather options"]]);
+    wx.body.id = "wxBody";
+    wx.title.id = "wxTitle";
+    el.append(time.card, ag.card, wx.card);
+    renderTime(time.body);
+    renderAgenda();
+    renderWeather();
+}
+
+function refreshDash(force) {
+    loadAgenda(!!force);
+    loadWeather(!!force);
+    const tb = $("timeBody");
+    if (tb) renderTime(tb);
+}
+
+setInterval(() => {
+    if (document.visibilityState === "hidden") return;
+    const tb = $("timeBody");
+    if (tb && pagerPage() === PAGE_DASH) renderTime(tb);
+}, 20000);
+
 
 // -------------------------------------------------------------------- init ----
 
@@ -1824,8 +2400,10 @@ function init() {
     refreshUsage();
     flush();
     render();
-    goPage(PAGE_MAIN, false);                       // open on the main screen, cloud to its left, usage list to its right
-    requestAnimationFrame(() => goPage(PAGE_MAIN, false));
+    goPage(homePage(), false);                      // open on the dashboard: cloud | dashboard | categories | most used
+    requestAnimationFrame(() => goPage(homePage(), false));
+    lastPage = homePage();
+    if (homePage() === PAGE_DASH) refreshDash(false);
     if (first) toast("Found " + r.added + " apps. ⋮ → Sort with AI, or long-press to organise.", 6000);
     if (!state.legacyImported) importLegacy(true);
 
