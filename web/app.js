@@ -208,10 +208,28 @@ function groupBlock(title, items, opts) {
 }
 
 // Screen 1: category cards.
+function setAllCollapsed(c) {
+    state.categories.forEach((x) => { x.collapsed = c; });
+    state.unsortedCollapsed = c;
+    commit();
+}
+
 function renderMain(el) {
     el.innerHTML = "";
     const items = state.items.filter((i) => !i.hidden);
     let any = false;
+    if (state.categories.length) {
+        const bar = document.createElement("div");
+        bar.className = "cardbar";
+        const mk = (label, c) => {
+            const b = document.createElement("button");
+            b.textContent = label;
+            b.onclick = () => setAllCollapsed(c);
+            return b;
+        };
+        bar.append(mk("▸ Collapse all", true), mk("▾ Expand all", false));
+        el.appendChild(bar);
+    }
     for (const c of state.categories) {
         any = true;
         el.appendChild(groupBlock(c.name, items.filter((i) => i.catId === c.id), {
@@ -289,31 +307,252 @@ function renderUsage(el) {
 }
 
 // Screen 0 (swipe right from the main screen): cloud of the AI keywords; tap a word to see everything related.
+//
+// Keeping the cloud small without touching the stored keywords (everything below is applied at display time,
+// so it is reversible):
+//   - automatic: plurals, accents and "... client / app / tool" variants count as one word (can be switched off)
+//   - AI merge: true synonyms are folded together (state.kwAlias / state.kwLabel)
+//   - manual: long-press a word to merge it into another, rename it or hide it
+//   - per item: a keyword can be removed from one app (item.noKw stops the AI from adding it back)
 let cloudSel = null;
+
+const GENERIC_WORDS = new Set(["app", "apps", "application", "applications", "client", "clients", "tool", "tools",
+    "manager", "service", "services", "software", "platform", "online", "mobile", "program", "programs"]);
 
 function kwList(i) {
     return (i.kw || "").split(/[,;\n]/).map((s) => s.trim()).filter((s) => s.length > 1 && s.length < 30);
 }
 
+function stem(w) {
+    if (w.length > 4 && w.endsWith("ies")) return w.slice(0, -3) + "y";
+    if (w.length > 3 && w.endsWith("ie")) return w.slice(0, -2) + "y";
+    if (w.length > 4 && /(s|x|z|ch|sh)es$/.test(w)) return w.slice(0, -2);
+    if (w.length > 3 && w.endsWith("s") && !w.endsWith("ss")) return w.slice(0, -1);
+    return w;
+}
+
+// The form of a keyword used to decide that two keywords are the same word.
+function canonKey(w) {
+    const f = fold(w).trim();
+    let words = f.split(/[^a-z0-9]+/).filter(Boolean);
+    if (!words.length) return f;
+    if (state.autoMerge !== false) {
+        const core = words.filter((x) => !GENERIC_WORDS.has(x));
+        if (core.length) words = core;
+        words = words.map(stem);
+    }
+    return words.join("");   // "e-mail", "e mail" and "email" are the same word
+}
+
+function resolveKey(k) {
+    const a = state.kwAlias || {};
+    for (let n = 0; n < 6 && a[k] && a[k] !== k; n++) k = a[k];
+    return k;
+}
+
+// Keyword keys of one item after removals, merges and hidden words.
+function itemKeys(i) {
+    const no = new Set(i.noKw || []), hide = new Set(state.kwHide || []), out = new Set();
+    for (const w of kwList(i)) {
+        const k0 = canonKey(w);
+        if (!k0 || no.has(fold(w)) || no.has(k0)) continue;
+        const k = resolveKey(k0);
+        if (no.has(k) || hide.has(k)) continue;
+        out.add(k);
+    }
+    return out;
+}
+
 function cloudWords() {
     const m = new Map();
+    const hide = new Set(state.kwHide || []);
     for (const i of state.items) {
         if (i.hidden) continue;
-        const seen = new Set();
+        const no = new Set(i.noKw || []), seen = new Set();
         for (const w of kwList(i)) {
-            const k = fold(w);
-            if (seen.has(k)) continue;
+            const k0 = canonKey(w);
+            if (!k0 || no.has(fold(w)) || no.has(k0)) continue;
+            const k = resolveKey(k0);
+            if (hide.has(k) || no.has(k) || seen.has(k)) continue;
             seen.add(k);
-            const e = m.get(k) || { k, label: w, n: 0 };
+            let e = m.get(k);
+            if (!e) { e = { k, n: 0, forms: new Map() }; m.set(k, e); }
             e.n++;
-            m.set(k, e);
+            e.forms.set(w, (e.forms.get(w) || 0) + 1);
         }
     }
-    return [...m.values()];
+    const min = state.cloudMin || 1, out = [];
+    for (const e of m.values()) {
+        if (e.n < min) continue;
+        const forms = [...e.forms.entries()].sort((a, b) => b[1] - a[1] || a[0].length - b[0].length);
+        out.push({ k: e.k, label: (state.kwLabel || {})[e.k] || forms[0][0], n: e.n, variants: forms.map((f) => f[0]) });
+    }
+    return out;
 }
 
 function relatedItems(k) {
-    return state.items.filter((i) => !i.hidden && (kwList(i).some((w) => fold(w) === k) || fold(i.label).includes(k)));
+    return state.items.filter((i) => !i.hidden && (itemKeys(i).has(k) || (k.length >= 4 && fold(i.label).includes(k))));
+}
+
+// Set an item's keywords, never re-adding ones the user removed from it.
+function setKw(i, str) {
+    const no = new Set(i.noKw || []);
+    const kept = String(str || "").split(/[,;\n]/).map((s) => s.trim())
+        .filter((s) => s.length > 1 && s.length < 30 && !no.has(fold(s)) && !no.has(canonKey(s)) && !no.has(resolveKey(canonKey(s))));
+    i.kw = [...new Set(kept)].join(", ").slice(0, 200);
+}
+
+function removeKwFromItem(i, k) {
+    const keep = [], no = new Set(i.noKw || []);
+    for (const w of kwList(i)) {
+        const k0 = canonKey(w);
+        if (k0 && resolveKey(k0) === k) no.add(fold(w)); else keep.push(w);
+    }
+    no.add(k);                       // the word itself, whatever form the AI uses next time
+    i.kw = keep.join(", ");
+    i.noKw = [...no];
+}
+
+function editKeywords(i) {
+    form("Keywords — " + i.label, [{ id: "kw", label: "Comma-separated. Removed words are not added back by the AI.", type: "textarea", rows: 5, value: i.kw || "" }],
+        "Save", (v) => {
+            const before = new Set(kwList(i).map(fold));
+            const after = String(v.kw).split(/[,;\n]/).map((s) => s.trim()).filter((s) => s.length > 1 && s.length < 30);
+            const afterSet = new Set(after.map(fold));
+            const no = new Set(i.noKw || []);
+            before.forEach((w) => { if (!afterSet.has(w)) no.add(w); });
+            afterSet.forEach((w) => no.delete(w));
+            i.noKw = [...no];
+            i.kw = [...new Set(after)].join(", ").slice(0, 200);
+            commit();
+        });
+}
+
+// ---- merging, renaming, hiding ----
+
+function mergeWords(from, into, intoLabel) {
+    if (from === into) return;
+    state.kwAlias = state.kwAlias || {};
+    state.kwLabel = state.kwLabel || {};
+    if (intoLabel && !state.kwLabel[into]) state.kwLabel[into] = intoLabel;   // the merged word keeps the target's name
+    state.kwAlias[from] = into;
+    for (const [k, v] of Object.entries(state.kwAlias)) if (v === from) state.kwAlias[k] = into;
+    commit();
+}
+
+function splitWord(k) {
+    const a = state.kwAlias || {};
+    for (const key of Object.keys(a)) if (a[key] === k) delete a[key];
+    commit();
+}
+
+function wordSheet(w) {
+    const merged = Object.values(state.kwAlias || {}).filter((v) => v === w.k).length;
+    const buttons = [
+        { label: "Show apps (" + w.n + ")", run: () => { cloudSel = { k: w.k, label: w.label }; renderCloud($("pageCloud")); } },
+        { label: "Merge into another word…", run: () => {
+            const others = cloudWords().filter((x) => x.k !== w.k).sort((a, b) => a.label.localeCompare(b.label));
+            if (!others.length) { toast("No other word to merge with"); return; }
+            form("Merge “" + w.label + "” into", [{ id: "to", label: "Other word", type: "select", options: others.map((x) => ({ value: x.k, label: x.label + " (" + x.n + ")" })) }],
+                "Merge", (v) => { mergeWords(w.k, v.to, (others.find((x) => x.k === v.to) || {}).label); toast("Merged"); });
+        } },
+        { label: "Rename…", run: () => form("Rename word", [{ id: "l", label: "Word", value: w.label }], "Rename", (v) => {
+            if (!v.l.trim()) return false;
+            state.kwLabel = state.kwLabel || {};
+            state.kwLabel[w.k] = v.l.trim();
+            commit();
+        }) }
+    ];
+    if (merged) buttons.push({ label: "Split merged words (" + merged + ")", run: () => splitWord(w.k) });
+    buttons.push({ label: "Hide this word", run: () => {
+        state.kwHide = state.kwHide || [];
+        if (!state.kwHide.includes(w.k)) state.kwHide.push(w.k);
+        commit();
+        toast("Hidden — undo via Condense… → Hidden words");
+    } });
+    sheet(w.label + (w.variants.length > 1 ? "  ·  " + w.variants.slice(0, 4).join(", ") : ""), buttons);
+}
+
+function condenseMenu() {
+    const hidden = (state.kwHide || []).length;
+    const buttons = [
+        { label: "Merge synonyms with AI…", run: aiCondense },
+        { label: "Auto-merge plurals and “… client/app”: " + (state.autoMerge === false ? "OFF" : "ON"), run: () => {
+            state.autoMerge = state.autoMerge === false; commit();
+        } },
+        { label: "Only words used by 2+ items: " + ((state.cloudMin || 1) > 1 ? "ON" : "OFF"), run: () => {
+            state.cloudMin = (state.cloudMin || 1) > 1 ? 1 : 2; commit();
+        } }
+    ];
+    if (hidden) buttons.push({ label: "Hidden words (" + hidden + ")…", run: () => sheet("Hidden words — tap to show again",
+        (state.kwHide || []).map((k) => ({ label: k, run: () => { state.kwHide = state.kwHide.filter((x) => x !== k); commit(); } }))) });
+    buttons.push({ label: "Reset merges, renames and hidden words", danger: true, run: () => {
+        state.kwAlias = {}; state.kwLabel = {}; state.kwHide = []; commit();
+    } });
+    sheet("Condense the cloud", buttons);
+}
+
+const CONDENSE_PROMPT =
+    "You merge duplicate or near-synonym search keywords. The input is a list of keywords, one per line. " +
+    "Find groups of words that mean the same thing: synonyms, plurals, translations, or variants such as 'email' and 'email client'. " +
+    "Do NOT merge words that are merely related (bank and money are different). " +
+    "Reply with plain text ONLY, one line per group of 2 or more words, in the form  Best word: other word, other word  " +
+    "(the best word is the simplest and most common one). Words with no duplicate are left out. No explanations, no markdown.";
+
+async function aiCondense() {
+    if (!aiConfigured()) { toast("Set up the AI server first"); aiSettings(); return; }
+    if (aiBusy) return;
+    const words = cloudWords().sort((a, b) => b.n - a.n).slice(0, 250);
+    if (words.length < 3) { toast("Not enough words to condense yet"); return; }
+    aiBusy = true;
+    const say = progressCard("Merging synonyms");
+    const t0 = Date.now();
+    const tick = setInterval(() => say("Asking the AI about " + words.length + " words…\n" + Math.round((Date.now() - t0) / 1000) + " s elapsed"), 1000);
+    say("Asking the AI about " + words.length + " words…");
+    try {
+        lastAiReply = ""; lastRaw = "";
+        const text = await aiAsk(CONDENSE_PROMPT, "Language: " + (state.ai.lang || "English") + "\nWORDS:\n" + words.map((w) => w.label).join("\n"), 3000);
+        lastAiReply = text;
+        const present = new Set(words.map((w) => w.k));
+        state.kwAlias = state.kwAlias || {};
+        state.kwLabel = state.kwLabel || {};
+        let groups = 0, merged = 0;
+        for (let line of text.replace(/<think>[\s\S]*?<\/think>/gi, "").replace(/```[a-z]*/gi, "").split(/\r?\n/)) {
+            line = line.trim().replace(/^([-*•]|\d+[.)])\s+/, "");
+            const c = line.indexOf(":");
+            if (c < 1) continue;
+            const best = line.slice(0, c).trim().replace(/^["'*]+|["'*]+$/g, "");
+            const kb = resolveKey(canonKey(best));
+            if (!kb) continue;
+            let did = false;
+            for (const v of line.slice(c + 1).split(/[,;]/)) {
+                const kv = resolveKey(canonKey(v.trim()));
+                if (!kv || kv === kb || !present.has(kv)) continue;
+                state.kwAlias[kv] = kb;
+                did = true;
+                merged++;
+            }
+            if (did) {
+                groups++;
+                const existing = words.find((x) => x.k === kb);   // keep the casing of a word that already exists
+                if (!state.kwLabel[kb]) state.kwLabel[kb] = existing ? existing.label : best;
+            }
+        }
+        clearInterval(tick);
+        commit();
+        if (!merged) {
+            resultCard("Nothing to merge", "The AI found no synonyms to merge in these " + words.length + " words (or its answer could not be read). Its reply:", text.slice(0, 2500));
+        } else {
+            closeOverlay();
+            toast("Merged " + merged + " words into " + groups + " groups", 5000);
+        }
+    } catch (e) {
+        clearInterval(tick);
+        resultCard("Could not merge words", String(e.message || e), lastAiReply ? "Last reply:\n" + lastAiReply.slice(0, 2500) : lastRaw ? lastRaw.slice(0, 1500) : "");
+    } finally {
+        clearInterval(tick);
+        aiBusy = false;
+    }
 }
 
 function renderCloud(el) {
@@ -337,6 +576,10 @@ function renderCloud(el) {
             el.appendChild(e);
             return;
         }
+        const hint = document.createElement("div");
+        hint.className = "cloudnote";
+        hint.textContent = "Long-press an app that doesn't belong → “Remove from this word”.";
+        el.appendChild(hint);
         const card = document.createElement("div");
         card.className = "group";
         const grid = document.createElement("div");
@@ -347,7 +590,7 @@ function renderCloud(el) {
         return;
     }
     const words = cloudWords();
-    if (!words.length) {
+    if (!words.length && !(state.items.some((i) => i.kw))) {
         const e = document.createElement("div");
         e.className = "empty";
         e.style.cssText = "padding:40px 20px;text-align:center;white-space:pre-line";
@@ -359,13 +602,25 @@ function renderCloud(el) {
         el.append(e, b);
         return;
     }
-    words.sort((a, b) => b.n - a.n || a.k.localeCompare(b.k));
-    const top = words.slice(0, 90);
-    const max = top[0].n, min = top[top.length - 1].n;
-    top.sort((a, b) => a.k.localeCompare(b.k));
-    const note = document.createElement("div");
-    note.className = "cloudnote";
-    note.textContent = "Tap a word to see all the apps and shortcuts that match.";
+    const bar = document.createElement("div");
+    bar.className = "cloudbar";
+    const note = document.createElement("span");
+    note.textContent = words.length + " words · tap to open, long-press to merge or hide";
+    const cb = document.createElement("button");
+    cb.textContent = "Condense…";
+    cb.onclick = condenseMenu;
+    bar.append(note, cb);
+    el.appendChild(bar);
+    if (!words.length) {
+        const e = document.createElement("div");
+        e.className = "empty";
+        e.textContent = "No words left with the current filters.";
+        el.appendChild(e);
+        return;
+    }
+    const byCount = words.slice().sort((a, b) => b.n - a.n || a.k.localeCompare(b.k)).slice(0, 90);
+    const max = byCount[0].n, min = byCount[byCount.length - 1].n;
+    const top = byCount.sort((a, b) => a.k.localeCompare(b.k));
     const cloud = document.createElement("div");
     cloud.className = "cloud";
     for (const w of top) {
@@ -377,11 +632,10 @@ function renderCloud(el) {
         const f = max === min ? 0.4 : (w.n - min) / (max - min);
         b.style.fontSize = Math.round(15 + 21 * f) + "px";
         b.style.color = "hsl(" + h + ",62%,52%)";
-        b.title = w.n + (w.n === 1 ? " item" : " items");
-        b.onclick = () => { cloudSel = { k: w.k, label: w.label }; renderCloud(el); el.scrollTop = 0; };
+        attachPress(b, () => { cloudSel = { k: w.k, label: w.label }; renderCloud(el); el.scrollTop = 0; }, () => wordSheet(w));
         cloud.appendChild(b);
     }
-    el.append(note, cloud);
+    el.appendChild(cloud);
 }
 
 function render() {
@@ -507,7 +761,7 @@ function exitSelect() {
 
 function onLong(item) {
     if (selectMode) { toggleSelect(item.id); return; }
-    itemSheet(item);
+    itemSheet(item, cloudSel && pagerPage() === PAGE_CLOUD ? cloudSel : null);
 }
 
 // ----------------------------------------------------------------- overlay ----
@@ -728,12 +982,21 @@ function setHidden(ids, hidden) {
     commit();
 }
 
-function itemSheet(item) {
+function itemSheet(item, word) {
     const ids = new Set([item.id]);
-    const buttons = [
+    const buttons = [];
+    if (word) {
+        buttons.push({ label: "Remove from “" + word.label + "”", run: () => {
+            removeKwFromItem(item, word.k);
+            commit();
+            toast("“" + item.label + "” no longer matches “" + word.label + "”");
+        } });
+    }
+    buttons.push(
         { label: "Move to category…", run: () => chooseCategory("Move “" + item.label + "” to", { unsorted: true }, (c) => moveItems(ids, c)) },
+        { label: "Edit keywords…", run: () => editKeywords(item) },
         { label: "Select several…", run: () => enterSelect(item.id) }
-    ];
+    );
     if (item.type === "app") {
         buttons.push({ label: "Rename", run: () => form("Rename", [{ id: "label", label: "Name", value: item.label }], "Rename", (v) => {
             const l = v.label.trim();
@@ -1107,7 +1370,7 @@ function applyAi(res, chunk, opts, created) {
         const cat = ensureCat(r.cat, created);
         if (!cat) continue;
         it.catId = cat.id;
-        if (r.kw && r.kw.trim()) it.kw = r.kw.trim().slice(0, 200);
+        if (r.kw && r.kw.trim()) setKw(it, r.kw);
         matched.add(it.id);
     }
     return { applied: matched.size, replied: rows.length };
@@ -1244,7 +1507,7 @@ async function aiIndex() {
             const byKey = new Map(chunk.map((i) => [keyOf(i).toLowerCase(), i]));
             for (const r of parseKeywordLines(text)) {
                 const it = byKey.get(r.key.toLowerCase());
-                if (it) { it.kw = r.kw; done++; }
+                if (it) { setKw(it, r.kw); if (it.kw) done++; }
             }
             save();
         }

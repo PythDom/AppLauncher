@@ -79,11 +79,16 @@
                     if (/mock-reason/.test(url)) { window.__httpResult(id, 200, JSON.stringify({ choices: [{ message: { content: "", reasoning: "Let me think..." } }] })); return; }
                     if (/mock-fail/.test(url)) { window.__httpResult(id, 500, '{"error":"model overloaded"}'); return; }
                     const system = anthropic ? (b.system || "") : (b.messages[0].content || "");
-                    let text = user === "ping" ? '{"ok":true}' : fakeModel(user);
+                    let text = user === "ping" ? '{"ok":true}' : /(?:APPS|ITEMS):\n/.test(user) ? fakeModel(user) : "";
                     if (user !== "ping" && /write search keywords/.test(system)) {
                         const ents = user.split(/ITEMS:\n/)[1].split("\n").map((l) => l.match(/^(\S+) \| (.*)$/)).filter(Boolean);
                         const o = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
                         text = ents.map((m) => m[1] + " | " + KW[(o.apps[m[1]] || {}).c || "Other"]).join("\n");
+                    } else if (user !== "ping" && /merge duplicate or near-synonym/.test(system)) {
+                        const have = user.split("WORDS:\n")[1].split("\n").map((s) => s.trim().toLowerCase());
+                        const groups = [["chat", "messages", "texting"], ["video", "movies", "streaming"], ["bank", "payment", "e-banking"], ["guitar", "instrument"]];
+                        text = groups.map((g) => g.filter((w) => have.includes(w))).filter((g) => g.length > 1)
+                            .map((g) => g[0][0].toUpperCase() + g[0].slice(1) + ": " + g.slice(1).join(", ")).join("\n") || "none";
                     } else if (user !== "ping" && /find apps on a phone/.test(system)) {
                         const q = user.match(/The user wants: (.*)\n/)[1].toLowerCase().split(/\s+/);
                         const ents = user.split(/ITEMS:\n/)[1].split("\n").map((l) => l.split(" | ")).filter((p) => p.length >= 2);
