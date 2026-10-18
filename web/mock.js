@@ -151,6 +151,7 @@
                 { id: 4, title: "Conference", begin: utc(2), end: utc(4), allDay: true, location: "Brussels", cal: "2" }]);
         },
         openEvent: (id, b, e) => { window.__lastEvent = id; },
+        openCalendarAt: (t) => { window.__lastCalDay = t; },
         hasLocationAccess: () => localStorage.getItem("mock-loc") === "1",
         requestLocation: (id) => { localStorage.setItem("mock-loc", "1"); setTimeout(() => window.__nativeResult(id, '{"granted":true,"lat":50.85,"lon":4.35,"place":"Brussels"}'), 80); }
     };

@@ -293,6 +293,16 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void openCalendarDay(long time) {
+        try {
+            Uri.Builder b = CalendarContract.CONTENT_URI.buildUpon().appendPath("time");
+            ContentUris.appendId(b, time);
+            startActivity(new Intent(Intent.ACTION_VIEW).setData(b.build()).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        } catch (Exception e) {
+            Toast.makeText(this, "No calendar app found to open this", Toast.LENGTH_SHORT).show();
+        }
+    }
+
     /** Answer to a request the page made through window.Android (see __nativeResult in app.js). */
     void nativeResult(int id, String json) {
         final String js = "window.__nativeResult(" + id + "," + JSONObject.quote(json) + ")";
@@ -929,6 +939,7 @@ public class MainActivity extends Activity {
             return arr.toString();
         }
 
+        /** Opens one calendar event in the phone's calendar app; falls back to that day if the event view is refused. */
         @JavascriptInterface
         public void openEvent(final double eventId, final double begin, final double end) {
             runOnUiThread(() -> {
@@ -940,9 +951,15 @@ public class MainActivity extends Activity {
                             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                     startActivity(i);
                 } catch (Exception e) {
-                    Toast.makeText(MainActivity.this, "Cannot open this event", Toast.LENGTH_SHORT).show();
+                    openCalendarDay((long) begin);
                 }
             });
+        }
+
+        /** Opens the calendar app on the day of the given time (for events that only exist as a calendar link). */
+        @JavascriptInterface
+        public void openCalendarAt(final double time) {
+            runOnUiThread(() -> openCalendarDay((long) time));
         }
 
         // ---- approximate location (for the weather) ----

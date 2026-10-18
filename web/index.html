@@ -82,6 +82,12 @@ header button { width: 40px; height: 40px; font-size: 20px; border-radius: 50%; 
 .tile.sel { background: color-mix(in srgb, var(--accent) 28%, transparent); outline: 2px solid var(--accent); }
 
 /* dashboard: time / agenda / weather */
+/* dashboard fits one screen: clocks and favourites keep their size, agenda and weather share the rest and scroll inside */
+#pageDash { display: flex; flex-direction: column; padding: 4px 10px 6px; overflow-y: auto; }
+#pageDash .wcard { margin: 4px 0; flex: 0 0 auto; }
+#pageDash .wcard.grow { flex: 1 1 0; min-height: 120px; display: flex; flex-direction: column; }
+#pageDash .wcard.grow > div:last-child { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+#pageDash .wcard.grow.shut { flex: 0 0 auto; min-height: 0; }
 .wcard { margin: 8px 0; padding: 6px 10px 10px; background: var(--card); border: 1px solid var(--line); border-radius: 22px;
          box-shadow: 0 1px 3px rgba(0,0,0,.10); }
 .wh { display: flex; align-items: center; gap: 8px; padding: 6px 2px 4px; }

@@ -2207,10 +2207,15 @@ async function loadAgenda(force) {
     renderAgenda();
 }
 
+function openDeviceEvent(e) {
+    try { A.openEvent(e.dev.id, e.dev.begin, e.dev.end); } catch (x) { toast("Could not open the event"); }
+}
+
 function eventSheet(e) {
     const when = e.allDay ? "All day" : new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }).format(new Date(e.begin)) + " – " + hhmm(e.end);
     const buttons = [];
-    if (e.dev) buttons.push({ label: "Open in Calendar", run: () => { try { A.openEvent(e.dev.id, e.dev.begin, e.dev.end); } catch (x) { /* ignore */ } } });
+    if (e.dev) buttons.push({ label: "Open in Calendar", run: () => openDeviceEvent(e) });
+    else if (typeof A.openCalendarAt === "function") buttons.push({ label: "Open the Calendar app on that day", run: () => { try { A.openCalendarAt(e.begin); } catch (x) { toast("Could not open the calendar"); } } });
     sheet(e.title + "\n" + when + (e.location ? "\n" + e.location : "") + (e.cal ? "\n(" + e.cal + ")" : ""), buttons);
 }
 
@@ -2264,7 +2269,7 @@ function renderAgenda() {
                 x.appendChild(lc);
             }
             r.append(t, x);
-            attachPress(r, () => (e.dev ? A.openEvent(e.dev.id, e.dev.begin, e.dev.end) : eventSheet(e)), () => eventSheet(e));
+            attachPress(r, () => (e.dev ? openDeviceEvent(e) : eventSheet(e)), () => eventSheet(e));   // tap: open in the calendar app; hold: details
             body.appendChild(r);
         }
     }
@@ -2652,6 +2657,8 @@ function renderDash(el) {
     wx.title.id = "wxTitle";
     const dk = dashCard("Favourites", []);
     dk.body.id = "dockBody";
+    ag.card.classList.add("grow");
+    wx.card.classList.add("grow");
     foldable(ag, "agenda", () => loadAgenda(false));
     foldable(wx, "wx", () => loadWeather(false));
     el.append(time.card, ag.card, wx.card, dk.card);
