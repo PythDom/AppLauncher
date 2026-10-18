@@ -39,8 +39,11 @@ function catOf(i) { return i.catId ? catById(i.catId) : null; }
 
 // ----------------------------------------------------------- app syncing ----
 
+const perf = {};
+const timed = (name, fn) => { const t = performance.now(); try { return fn(); } finally { perf[name] = Math.round(performance.now() - t); } };
+
 function installedApps() {
-    try { return JSON.parse(A.listApps()); } catch (e) { return []; }
+    return timed("listApps", () => { try { return JSON.parse(A.listApps()); } catch (e) { return []; } });
 }
 
 // Adds newly installed apps, drops uninstalled ones, refreshes labels.
@@ -336,10 +339,12 @@ let usageGranted = false;
 const hasUsageApi = () => typeof A.usageAccess === "function";
 
 function refreshUsage() {
-    try {
-        usageGranted = hasUsageApi() && !!A.usageAccess();
-        usageMs = usageGranted ? JSON.parse(A.usageStats()) : {};
-    } catch (e) { usageGranted = false; usageMs = {}; }
+    timed("usageStats", () => {
+        try {
+            usageGranted = hasUsageApi() && !!A.usageAccess();
+            usageMs = usageGranted ? JSON.parse(A.usageStats()) : {};
+        } catch (e) { usageGranted = false; usageMs = {}; }
+    });
 }
 
 // Foreground time over the last 30 days (real usage, needs permission) plus launches made from here
@@ -1263,6 +1268,9 @@ function settingsMenu() {
             copy.ai.key = "";
             try { A.copyText(JSON.stringify(copy)); toast("Backup copied (without the AI key)"); } catch (e) { toast("Copy failed"); }
         } },
+        { label: "Speed report…", run: () => resultCard("Speed report (milliseconds)", "How long each start-up step took on this phone:",
+            "Page + scripts loaded after: " + perf.pageLoad + "\nSaved state read: " + perf.loadState + "\nFirst screens drawn: " + perf.firstRender +
+            "\nApp scan (last): " + perf.listApps + "\nUsage query (last): " + perf.usageStats + "\nFully ready at: " + perf.ready) },
         { label: "Restore from pasted backup…", run: restoreForm },
         { label: "Reset all organisation", danger: true, run: () => confirmSheet("Delete all categories, shortcuts and settings and start over?", "Reset", () => {
             const ai = state.ai;
@@ -2511,15 +2519,23 @@ setInterval(() => {
 // -------------------------------------------------------------------- init ----
 
 function init() {
-    state = load();
+    perf.pageLoad = Math.round(performance.now());           // time from navigation start until this script runs
+    state = timed("loadState", load);
     let first = false;
     if (!state || !Array.isArray(state.items)) { state = newState(); first = true; }
     state.ai = Object.assign({}, DEFAULT_AI, state.ai || {});
     state.launches = state.launches || {};
-    const r = reconcile();
-    refreshUsage();
-    flush();
-    render();
+    // Later starts paint straight from the saved state; the (slower) app scan and usage query run just after.
+    const r = first ? reconcile() : { added: 0, removed: 0 };
+    if (first) { refreshUsage(); flush(); }
+    timed("firstRender", render);
+    if (!first) setTimeout(() => {
+        const r2 = reconcile();
+        refreshUsage();
+        if (r2.added || r2.removed) { commit(); toast(r2.added + " new app" + (r2.added === 1 ? "" : "s") + (r2.removed ? ", " + r2.removed + " removed" : "")); }
+        else { renderUsage($("page1")); renderCloud($("pageCloud")); }
+        perf.ready = Math.round(performance.now());
+    }, 60);
     goPage(homePage(), false);                      // open on the dashboard: cloud | dashboard | categories | most used
     requestAnimationFrame(() => goPage(homePage(), false));
     lastPage = homePage();

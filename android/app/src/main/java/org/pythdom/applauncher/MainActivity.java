@@ -87,6 +87,9 @@ public class MainActivity extends Activity {
     private FrameLayout root;
     private ValueCallback<Uri[]> filePathCallback;
     private final Map<String, byte[]> icons = new HashMap<>();
+    private final Map<String, String> labels = new HashMap<>();   // app labels never change within a process
+    private String usageCache = "{}";
+    private long usageAt = 0;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -99,6 +102,20 @@ public class MainActivity extends Activity {
         applyColors();
         configureWebView();
         web.loadUrl(HOME_URL);
+        Thread warm = new Thread(this::prewarmIcons);
+        warm.setPriority(Thread.NORM_PRIORITY - 1);
+        warm.start();
+    }
+
+    /** Renders any missing app icon into the on-disk cache so the first screen never waits for them. */
+    private void prewarmIcons() {
+        try {
+            Intent main = new Intent(Intent.ACTION_MAIN, null);
+            main.addCategory(Intent.CATEGORY_LAUNCHER);
+            for (ResolveInfo ri : getPackageManager().queryIntentActivities(main, 0)) iconPng(ri.activityInfo.packageName);
+        } catch (Exception e) {
+            // best effort
+        }
     }
 
     private boolean isNight() {
@@ -219,14 +236,52 @@ public class MainActivity extends Activity {
             if (cached != null) return cached;
         }
         try {
-            Drawable d = getPackageManager().getApplicationIcon(pkg);
-            Bitmap bmp = Bitmap.createBitmap(ICON_PX, ICON_PX, Bitmap.Config.ARGB_8888);
-            Canvas canvas = new Canvas(bmp);
-            d.setBounds(0, 0, ICON_PX, ICON_PX);
-            d.draw(canvas);
-            ByteArrayOutputStream bos = new ByteArrayOutputStream();
-            bmp.compress(Bitmap.CompressFormat.PNG, 100, bos);
-            byte[] png = bos.toByteArray();
+            long stamp = 0;
+            try {
+                stamp = getPackageManager().getPackageInfo(pkg, 0).lastUpdateTime;   // new file name after an app update
+            } catch (Exception e) {
+                // fall through: getApplicationIcon below decides whether the app exists
+            }
+            File dir = new File(getFilesDir(), "icons");
+            dir.mkdirs();
+            File file = new File(dir, pkg + "@" + stamp + ".png");
+            byte[] png = null;
+            if (file.exists()) {
+                try {
+                    png = readAll(new FileInputStream(file));
+                } catch (IOException e) {
+                    png = null;
+                }
+            }
+            if (png == null) {
+                Drawable d = getPackageManager().getApplicationIcon(pkg);
+                Bitmap bmp = Bitmap.createBitmap(ICON_PX, ICON_PX, Bitmap.Config.ARGB_8888);
+                Canvas canvas = new Canvas(bmp);
+                d.setBounds(0, 0, ICON_PX, ICON_PX);
+                d.draw(canvas);
+                ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                bmp.compress(Bitmap.CompressFormat.PNG, 100, bos);
+                png = bos.toByteArray();
+                try {
+                    File tmp = new File(dir, pkg + ".tmp");
+                    OutputStream out = new FileOutputStream(tmp);
+                    try {
+                        out.write(png);
+                    } finally {
+                        out.close();
+                    }
+                    if (tmp.renameTo(file)) {
+                        File[] old = dir.listFiles();
+                        if (old != null) {
+                            for (File o : old) {
+                                if (o.getName().startsWith(pkg + "@") && !o.getName().equals(file.getName())) o.delete();
+                            }
+                        }
+                    }
+                } catch (IOException e) {
+                    // the in-memory copy still serves this run
+                }
+            }
             synchronized (icons) {
                 icons.put(pkg, png);
             }
@@ -391,9 +446,6 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         web.onResume();
-        synchronized (icons) {
-            icons.clear();
-        }
         web.evaluateJavascript("window.__onResume&&window.__onResume()", null);
     }
 
@@ -419,7 +471,17 @@ public class MainActivity extends Activity {
                 for (ResolveInfo ri : found) {
                     String pkg = ri.activityInfo.packageName;
                     if (pkg.equals(getPackageName()) || !seen.add(pkg)) continue;
-                    rows.add(new String[]{ri.loadLabel(pm).toString(), pkg});
+                    String label;
+                    synchronized (labels) {
+                        label = labels.get(pkg);
+                    }
+                    if (label == null) {
+                        label = ri.loadLabel(pm).toString();
+                        synchronized (labels) {
+                            labels.put(pkg, label);
+                        }
+                    }
+                    rows.add(new String[]{label, pkg});
                 }
                 Collections.sort(rows, (a, b) -> a[0].compareToIgnoreCase(b[0]));
                 JSONArray arr = new JSONArray();
@@ -515,6 +577,9 @@ public class MainActivity extends Activity {
         /** {"package": millisecondsInForeground} over the last 30 days; {} without permission. */
         @JavascriptInterface
         public String usageStats() {
+            synchronized (MainActivity.this) {
+                if (System.currentTimeMillis() - usageAt < 120000) return usageCache;
+            }
             JSONObject o = new JSONObject();
             try {
                 UsageStatsManager m = (UsageStatsManager) getSystemService(Context.USAGE_STATS_SERVICE);
@@ -528,7 +593,11 @@ public class MainActivity extends Activity {
             } catch (Exception e) {
                 // no permission or no data: the page falls back to launch counts
             }
-            return o.toString();
+            synchronized (MainActivity.this) {
+                usageCache = o.toString();
+                usageAt = System.currentTimeMillis();
+                return usageCache;
+            }
         }
 
         @JavascriptInterface
