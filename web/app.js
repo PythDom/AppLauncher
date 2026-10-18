@@ -2617,45 +2617,62 @@ function weatherMenu() {
 
 
 // ---------------------------------------------------------------- dock ----
-// Six favourite apps on one line under the weather; the user picks them.
+// Favourites bar under the weather: 6 slots. A slot holds one app/shortcut, or a folder of several.
+// state.dock = [ null | "itemId" | { name, ids: [itemId...] } ] x 6
 
-const DOCK_N = 6;
-const dockIds = () => {
+const DOCK_N = 6, FOLDER_MAX = 12;
+const dockEntries = () => {
     const d = Array.isArray(state.dock) ? state.dock.slice(0, DOCK_N) : [];
     while (d.length < DOCK_N) d.push(null);
     return d;
 };
+const isFolder = (e) => !!e && typeof e === "object" && Array.isArray(e.ids);
 
-function setDock(slot, id) {
-    const d = dockIds();
-    if (id) { const k = d.indexOf(id); if (k >= 0) d[k] = null; }   // an app sits in one slot only
-    d[slot] = id;
-    state.dock = d;
-    commit();
+// A copy of the bar with the given items removed from every slot and folder (an item appears once on the bar).
+function dockWithout(ids) {
+    return dockEntries().map((e) => {
+        if (isFolder(e)) return { name: e.name, ids: e.ids.filter((x) => !ids.includes(x)) };
+        return e && ids.includes(e) ? null : e;
+    });
 }
 
-function dockPicker(slot) {
+function saveDock(d) { state.dock = d; commit(); }
+
+function itemIcon(item) {
+    const img = document.createElement("img");
+    img.src = iconSrc(item);
+    img.onerror = () => { img.onerror = null; img.src = letterIcon(item.label); };
+    return img;
+}
+
+// Pick apps/shortcuts. multi=false: the first tap answers. multi=true: tick several, then Done.
+function itemPicker(title, multi, preselected, onDone) {
+    const chosen = new Set(preselected);
     const w = document.createElement("div");
     const t = document.createElement("h3");
-    t.textContent = "Choose an app for slot " + (slot + 1);
+    t.textContent = title;
     const q = document.createElement("input");
     q.type = "search";
     q.placeholder = "Filter…";
     q.autocomplete = "off";
     q.style.cssText = "width:100%;padding:10px;font-size:16px;border-radius:10px;border:1px solid var(--line);background:var(--tile);color:var(--text);margin-bottom:6px";
     const list = document.createElement("div");
-    const all = state.items.filter((i) => !i.hidden).sort((a, b) => usageScore(b) - usageScore(a) || a.label.localeCompare(b.label));
+    const all = state.items.filter((i) => !i.hidden).sort((a, b) => usageScore(b) - usageScore(a) || shownLabel(a).localeCompare(shownLabel(b)));
     const fill = () => {
         list.innerHTML = "";
         const f = fold(q.value.trim());
-        all.filter((i) => !f || fold(i.label).includes(f)).slice(0, 80).forEach((i) => {
+        all.filter((i) => !f || fold(i.label).includes(f) || chosen.has(i.id)).slice(0, 80).forEach((i) => {
             const b = document.createElement("button");
             b.className = "sbtn dockopt";
-            const img = document.createElement("img");
-            img.src = iconSrc(i);
-            img.onerror = () => { img.onerror = null; img.src = letterIcon(i.label); };
-            b.append(img, document.createTextNode(i.label));
-            b.onclick = () => { closeOverlay(); setDock(slot, i.id); };
+            const mark = document.createElement("span");
+            mark.className = "tick";
+            mark.textContent = multi && chosen.has(i.id) ? "✓" : "";
+            b.append(itemIcon(i), document.createTextNode(shownLabel(i)), mark);
+            b.onclick = () => {
+                if (!multi) { closeOverlay(); onDone([i.id]); return; }
+                if (chosen.has(i.id)) chosen.delete(i.id); else if (chosen.size < FOLDER_MAX) chosen.add(i.id); else toast("A folder holds up to " + FOLDER_MAX);
+                mark.textContent = chosen.has(i.id) ? "✓" : "";
+            };
             list.appendChild(b);
         });
     };
@@ -2667,7 +2684,98 @@ function dockPicker(slot) {
     c.textContent = "Cancel";
     c.onclick = closeOverlay;
     row.appendChild(c);
+    if (multi) {
+        const ok = document.createElement("button");
+        ok.className = "p";
+        ok.textContent = "Done";
+        ok.onclick = () => { closeOverlay(); onDone([...chosen]); };
+        row.appendChild(ok);
+    }
     w.append(t, q, list, row);
+    showCard(w);
+}
+
+function pickForSlot(slot) {
+    itemPicker("Choose an app or shortcut", false, [], ([id]) => {
+        const d = dockWithout([id]);
+        d[slot] = id;
+        saveDock(d);
+    });
+}
+
+function newFolder(slot, firstId) {
+    form("New folder", [{ id: "name", label: "Name", value: "Folder" }], "Next", (v) => {
+        const name = normName(v.name) || "Folder";
+        setTimeout(() => itemPicker("Add to “" + name + "”", true, firstId ? [firstId] : [], (ids) => {
+            const d = dockWithout(ids);
+            d[slot] = { name, ids: ids.slice(0, FOLDER_MAX) };
+            saveDock(d);
+        }), 0);
+    });
+}
+
+function renameFolder(slot, reopen) {
+    const e = dockEntries()[slot];
+    if (!isFolder(e)) return;
+    form("Rename folder", [{ id: "name", label: "Name", value: e.name }], "Rename", (v) => {
+        const d = dockEntries();
+        d[slot] = { name: normName(v.name) || e.name, ids: e.ids };
+        saveDock(d);
+        if (reopen) setTimeout(() => openFolder(slot), 0);
+    });
+}
+
+function addToFolder(slot) {
+    const e = dockEntries()[slot];
+    if (!isFolder(e)) return;
+    itemPicker("Add to “" + e.name + "”", true, e.ids, (ids) => {
+        const d = dockWithout(ids);
+        d[slot] = { name: e.name, ids: ids.slice(0, FOLDER_MAX) };
+        saveDock(d);
+        openFolder(slot);
+    });
+}
+
+function openFolder(slot) {
+    const e = dockEntries()[slot];
+    if (!isFolder(e)) return;
+    const items = e.ids.map(itemById).filter(Boolean);
+    const w = document.createElement("div");
+    const h = document.createElement("h3");
+    h.textContent = e.name;
+    const grid = document.createElement("div");
+    grid.className = "fgrid";
+    items.forEach((item) => {
+        const d = document.createElement("div");
+        d.className = "dslot";
+        const l = document.createElement("div");
+        l.textContent = shownLabel(item);
+        d.append(itemIcon(item), l);
+        attachPress(d, () => { closeOverlay(); launch(item); }, () => sheet(item.label, [
+            { label: "Remove from the folder", run: () => {
+                const dd = dockEntries();
+                dd[slot] = { name: e.name, ids: e.ids.filter((x) => x !== item.id) };
+                saveDock(dd);
+                openFolder(slot);
+            } },
+            { label: "More options…", run: () => itemSheet(item) }
+        ]));
+        grid.appendChild(d);
+    });
+    w.append(h, grid);
+    if (!items.length) {
+        const n = document.createElement("div");
+        n.className = "empty";
+        n.textContent = "Empty folder. Use “Add…” to put apps or shortcuts in it.";
+        w.appendChild(n);
+    }
+    const row = document.createElement("div");
+    row.className = "row";
+    const mk = (label, fn, cls) => { const b = document.createElement("button"); b.textContent = label; if (cls) b.className = cls; b.onclick = fn; row.appendChild(b); };
+    mk("Add…", () => addToFolder(slot));
+    mk("Rename", () => renameFolder(slot, true));
+    mk("Done", closeOverlay, "p");
+    w.appendChild(row);
     showCard(w);
 }
 
@@ -2675,24 +2783,39 @@ function renderDock(body) {
     body.innerHTML = "";
     const row = document.createElement("div");
     row.className = "dock";
-    dockIds().forEach((id, slot) => {
-        const item = id && itemById(id);
+    dockEntries().forEach((e, slot) => {
         const d = document.createElement("div");
-        d.className = "dslot" + (item ? "" : " empty");
-        if (item) {
-            const img = document.createElement("img");
-            img.src = iconSrc(item);
-            img.onerror = () => { img.onerror = null; img.src = letterIcon(item.label); };
+        const item = typeof e === "string" ? itemById(e) : null;
+        if (isFolder(e)) {
+            d.className = "dslot fold";
+            const box = document.createElement("div");
+            box.className = "fbox";
+            e.ids.map(itemById).filter(Boolean).slice(0, 4).forEach((it) => box.appendChild(itemIcon(it)));
+            const l = document.createElement("div");
+            l.textContent = e.name;
+            d.append(box, l);
+            attachPress(d, () => openFolder(slot), () => sheet(e.name, [
+                { label: "Add apps or shortcuts…", run: () => addToFolder(slot) },
+                { label: "Rename…", run: () => renameFolder(slot, false) },
+                { label: "Remove the folder (items stay in the launcher)", danger: true, run: () => { const dd = dockEntries(); dd[slot] = null; saveDock(dd); } }
+            ]));
+        } else if (item) {
+            d.className = "dslot";
             const l = document.createElement("div");
             l.textContent = shownLabel(item);
-            d.append(img, l);
+            d.append(itemIcon(item), l);
             attachPress(d, () => launch(item), () => sheet(item.label, [
-                { label: "Replace…", run: () => dockPicker(slot) },
-                { label: "Remove from the bar", run: () => setDock(slot, null) }
+                { label: "Replace…", run: () => pickForSlot(slot) },
+                { label: "Make a folder with this…", run: () => newFolder(slot, item.id) },
+                { label: "Remove from the bar", run: () => { const dd = dockEntries(); dd[slot] = null; saveDock(dd); } }
             ]));
         } else {
+            d.className = "dslot empty";
             d.textContent = "+";
-            d.onclick = () => dockPicker(slot);
+            d.onclick = () => sheet("Favourites slot " + (slot + 1), [
+                { label: "Add an app or shortcut…", run: () => pickForSlot(slot) },
+                { label: "New folder…", run: () => newFolder(slot) }
+            ]);
         }
         row.appendChild(d);
     });
