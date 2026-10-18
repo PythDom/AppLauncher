@@ -918,9 +918,18 @@ function renderResults() {
 const SECURE_URL = "launcher://secure-folder";
 const SECURE_ICON = "data:image/svg+xml;utf8," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96"><rect width="96" height="96" rx="22" fill="#1a73e8"/><rect x="26" y="44" width="44" height="34" rx="6" fill="#fff"/><path d="M34 44v-9a14 14 0 0 1 28 0v9" fill="none" stroke="#fff" stroke-width="7"/></svg>');
 
+// Android refuses to let an ordinary app start anything inside Samsung's Secure Folder (tested on the user's phone: both
+// documented routes are blocked), so by default this opens the Secure Folder app itself; its own list then has the apps.
+function openSecureFolderApp() {
+    let ok = false;
+    try { ok = A.launch("com.samsung.knox.securefolder"); } catch (e) { /* ignore */ }
+    if (!ok) toast("Secure Folder app not found on this phone");
+}
+
 function openSecureLauncher() {
+    if (!state.secureProbe) { openSecureFolderApp(); return; }
     if (typeof A.openLauncherInSecure !== "function") { toast("Not available in this version"); return; }
-    toast("Asking Android to start the Secure Folder launcher…", 2500);
+    toast("Trying to start the launcher inside the Secure Folder…", 2500);
     // "Accepted" is not proof: if this page is still in front a moment later, nothing opened and the next route is tried.
     const cameForward = () => new Promise((res) => setTimeout(() => res(document.visibilityState !== "visible"), 1500));
     const describe = (name, r) => name + ": " + (r && r.ok ? "accepted by Android, but nothing opened" : "refused") + "\n" +
@@ -943,9 +952,9 @@ function openSecureLauncher() {
 
 function addSecureShortcut() {
     if (state.items.some((i) => i.type === "link" && i.url === SECURE_URL)) { toast("That shortcut already exists"); return; }
-    state.items.push({ id: "s:" + uid(), type: "link", label: "Secure Folder launcher", url: SECURE_URL, icon: SECURE_ICON, catId: null, page: 0 });
+    state.items.push({ id: "s:" + uid(), type: "link", label: "Secure Folder", url: SECURE_URL, icon: SECURE_ICON, catId: null, page: 0 });
     commit();
-    toast("Added “Secure Folder launcher” — move it to a category or the favourites bar");
+    toast("Added “Secure Folder” — move it to a category or the favourites bar");
 }
 
 function launch(item) {
@@ -1326,7 +1335,7 @@ function mainMenu() {
         { label: state.mainView === "cloud" ? "Show categories as cards" : "Show categories as a word cloud", run: () => { state.mainView = state.mainView === "cloud" ? "cards" : "cloud"; mainSel = null; commit(); } },
         { label: state.startPage === "main" ? "Home button opens: categories → switch to dashboard" : "Home button opens: dashboard → switch to categories",
             run: () => { state.startPage = state.startPage === "main" ? "dash" : "main"; save(); toast("Home now opens the " + (state.startPage === "main" ? "categories" : "dashboard")); } },
-        { label: "Open the launcher in Secure Folder", run: openSecureLauncher },
+        { label: "Open Secure Folder", run: openSecureLauncher },
         { label: "Import old Launcher shortcuts", run: () => importLegacy(false) },
         { label: "Rescan installed apps", run: () => { const r = reconcile(); commit(); toast(r.added + " new, " + r.removed + " removed"); } },
         { label: "Settings & backup…", run: settingsMenu }
@@ -1343,7 +1352,9 @@ function settingsMenu() {
         } },
         { label: state.noProfiles ? "Show apps from other profiles (work / Secure Folder)" : "Hide apps from other profiles (work / Secure Folder)",
             run: () => { state.noProfiles = !state.noProfiles; const r = reconcile(); commit(); toast(state.noProfiles ? "Other profiles hidden" : "Rescanning…"); if (!state.noProfiles) scanAndReconcile(() => commit()); } },
-        { label: "Add a “Secure Folder launcher” shortcut", run: addSecureShortcut },
+        { label: "Add an “Open Secure Folder” shortcut", run: addSecureShortcut },
+        { label: state.secureProbe ? "Secure Folder button: back to just opening Secure Folder" : "Secure Folder button: try starting the launcher inside it (experimental)",
+            run: () => { state.secureProbe = !state.secureProbe; save(); toast(state.secureProbe ? "Will try a direct start first" : "Will open the Secure Folder app"); } },
         { label: "Check Secure Folder / work profile access…", run: () => resultCard("Profiles this app can see",
             "If only one profile is listed, Android does not let this launcher list or open apps from the Secure Folder.",
             typeof A.profilesInfo === "function" ? A.profilesInfo() : "Not available in this version.") },
