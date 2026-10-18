@@ -902,7 +902,10 @@ function launch(item) {
         try { ok = A.launch(item.pkg); } catch (e) { /* ignore */ }
         if (!ok) toast("Could not open " + item.label);
     } else {
-        try { A.openUrl(item.url); } catch (e) { toast("Could not open link"); }
+        try {
+            if (item.browser && typeof A.openUrlIn === "function") A.openUrlIn(item.url, item.browser);
+            else A.openUrl(item.url);
+        } catch (e) { toast("Could not open link"); }
     }
 }
 
@@ -1186,22 +1189,34 @@ function itemSheet(item, word) {
     sheet(item.label, buttons);
 }
 
+function installedBrowsers() {
+    try { return typeof A.browsers === "function" ? JSON.parse(A.browsers()) : []; } catch (e) { return []; }
+}
+
 function shortcutForm(item) {
     const opts = [{ value: "", label: "Unsorted" }].concat(state.categories.map((c) => ({ value: c.id, label: c.name })));
-    form(item ? "Edit shortcut" : "New shortcut", [
+    const browsers = installedBrowsers();
+    const bopts = [{ value: "", label: "Default browser (Android decides)" }].concat(browsers.map((b) => ({ value: b.package, label: b.label })));
+    if (item && item.browser && !browsers.some((b) => b.package === item.browser)) bopts.push({ value: item.browser, label: item.browser + " (not installed)" });
+    const fields = [
         { id: "label", label: "Name", value: item ? item.label : "" },
         { id: "url", label: "Address (URL)", type: "url", value: item ? item.url : "", placeholder: "https://example.com" },
-        { id: "cat", label: "Category", type: "select", options: opts, value: item ? (item.catId || "") : "" },
-        { id: "icon", label: "Icon (optional — otherwise the site's icon)", type: "file" }
-    ], "Save", (v) => {
+        { id: "cat", label: "Category", type: "select", options: opts, value: item ? (item.catId || "") : "" }
+    ];
+    if (typeof A.openUrlIn === "function") fields.push({ id: "browser", label: "Open with", type: "select", options: bopts, value: item ? (item.browser || "") : "" });
+    fields.push({ id: "icon", label: "Icon (optional — otherwise the site's icon)", type: "file" });
+    form(item ? "Edit shortcut" : "New shortcut", fields, "Save", (v) => {
         const label = v.label.trim(), url = normUrl(v.url);
         if (!label || !url) { toast("Name and address are required"); return false; }
+        const setBrowser = (it) => { if (v.browser) it.browser = v.browser; else delete it.browser; };
         if (item) {
             item.label = label; item.url = url; item.catId = v.cat || null;
             if (v.icon) item.icon = v.icon;
+            if ("browser" in v) setBrowser(item);
         } else {
             const n = { id: "s:" + uid(), type: "link", label, url, catId: v.cat || null, page: 0 };
             if (v.icon) n.icon = v.icon;
+            if (v.browser) n.browser = v.browser;
             state.items.push(n);
         }
         commit();
@@ -1312,7 +1327,7 @@ function categoriesExport() {
         items: state.items.filter((i) => catOf(i)).map((i) => {
             const o = { type: i.type, label: i.label, cat: names.get(i.catId) };
             if (i.type === "app") o.pkg = i.pkg;
-            else { o.url = i.url; if (i.icon) o.icon = i.icon; if (i.kw) o.kw = i.kw; }
+            else { o.url = i.url; if (i.icon) o.icon = i.icon; if (i.kw) o.kw = i.kw; if (i.browser) o.browser = i.browser; }
             return o;
         })
     };
@@ -1373,6 +1388,7 @@ function importCategories(text, moveSorted, apply) {
                 const ic = safeIcon(i.icon);
                 if (ic) n.icon = ic;
                 if (typeof i.kw === "string" && i.kw) n.kw = i.kw.slice(0, 200);
+                if (typeof i.browser === "string" && /^[\w.]{1,100}$/.test(i.browser)) n.browser = i.browser;
                 state.items.push(n);
                 links.set(urlKey(url), n);
             }

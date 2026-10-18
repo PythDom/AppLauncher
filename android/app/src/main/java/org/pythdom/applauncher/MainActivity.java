@@ -584,6 +584,51 @@ public class MainActivity extends Activity {
             runOnUiThread(() -> openExternal(url));
         }
 
+        /** Open a web address in one chosen browser; falls back to the default when it is gone or the link is not http(s). */
+        @JavascriptInterface
+        public void openUrlIn(final String url, final String pkg) {
+            runOnUiThread(() -> {
+                if (pkg != null && !pkg.isEmpty() && url.toLowerCase(Locale.ROOT).matches("^https?://.*")) {
+                    try {
+                        Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url)).setPackage(pkg).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        startActivity(i);
+                        return;
+                    } catch (Exception e) {
+                        Toast.makeText(MainActivity.this, "That browser is not available, using the default", Toast.LENGTH_SHORT).show();
+                    }
+                }
+                openExternal(url);
+            });
+        }
+
+        /** Installed browsers as [{label, package}]. */
+        @JavascriptInterface
+        public String browsers() {
+            JSONArray arr = new JSONArray();
+            try {
+                PackageManager pm = getPackageManager();
+                Intent probe = new Intent(Intent.ACTION_VIEW, Uri.parse("https://example.com")).addCategory(Intent.CATEGORY_BROWSABLE);
+                List<ResolveInfo> found = pm.queryIntentActivities(probe, PackageManager.MATCH_ALL);
+                Set<String> seen = new HashSet<>();
+                List<String[]> rows = new ArrayList<>();
+                for (ResolveInfo ri : found) {
+                    String pkg = ri.activityInfo.packageName;
+                    if (pkg.equals(getPackageName()) || !seen.add(pkg)) continue;
+                    rows.add(new String[]{ri.loadLabel(pm).toString(), pkg});
+                }
+                Collections.sort(rows, (a, b) -> a[0].compareToIgnoreCase(b[0]));
+                for (String[] r : rows) {
+                    JSONObject o = new JSONObject();
+                    o.put("label", r[0]);
+                    o.put("package", r[1]);
+                    arr.put(o);
+                }
+            } catch (Exception e) {
+                // empty list: the form then only offers the default browser
+            }
+            return arr.toString();
+        }
+
         @JavascriptInterface
         public void appInfo(final String pkg) {
             runOnUiThread(() -> {
