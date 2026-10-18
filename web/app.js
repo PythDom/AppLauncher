@@ -1283,6 +1283,9 @@ function settingsMenu() {
             copy.ai.key = "";
             try { A.copyText(JSON.stringify(copy)); toast("Backup copied (without the AI key)"); } catch (e) { toast("Copy failed"); }
         } },
+        { label: "Check Secure Folder / work profile access…", run: () => resultCard("Profiles this app can see",
+            "If only one profile is listed, Android does not let this launcher list or open apps from the Secure Folder.",
+            typeof A.profilesInfo === "function" ? A.profilesInfo() : "Not available in this version.") },
         { label: "Speed report…", run: () => resultCard("Speed report (milliseconds)", "How long each start-up step took on this phone:",
             "Page + scripts loaded after: " + perf.pageLoad + "\nSaved state read: " + perf.loadState + "\nFirst screens drawn: " + perf.firstRender +
             "\nApp scan (last, background): " + perf.listApps + (typeof A.scanInfo === "function" ? "\n   " + A.scanInfo() : "") +

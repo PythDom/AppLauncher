@@ -21,7 +21,10 @@ import android.provider.CalendarContract;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.content.pm.LauncherApps;
 import android.content.res.Configuration;
+import android.os.UserHandle;
+import android.os.UserManager;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -609,6 +612,33 @@ public class MainActivity extends Activity {
                 }
                 openExternal(url);
             });
+        }
+
+        /** Diagnostic: which user profiles (work profile, Secure Folder...) Android lets this app see, and how many apps each has. */
+        @JavascriptInterface
+        public String profilesInfo() {
+            StringBuilder sb = new StringBuilder();
+            try {
+                sb.append("This copy runs as: ").append(android.os.Process.myUserHandle()).append("\n");
+                sb.append("Default home app: ").append(isDefaultHome() ? "yes" : "no").append("\n");
+                UserManager um = (UserManager) getSystemService(Context.USER_SERVICE);
+                LauncherApps la = (LauncherApps) getSystemService(Context.LAUNCHER_APPS_SERVICE);
+                List<UserHandle> profiles = la.getProfiles();
+                sb.append("Profiles visible through the launcher service: ").append(profiles.size()).append("\n");
+                for (UserHandle h : profiles) {
+                    String n;
+                    try {
+                        n = String.valueOf(la.getActivityList(null, h).size());
+                    } catch (Exception e) {
+                        n = "refused (" + e.getClass().getSimpleName() + ")";
+                    }
+                    sb.append("  ").append(h).append(h.equals(android.os.Process.myUserHandle()) ? " (this one)" : "").append(": ").append(n).append(" launchable apps\n");
+                }
+                sb.append("Profiles visible through the user service: ").append(um.getUserProfiles().size()).append("\n");
+            } catch (Exception e) {
+                sb.append("Check failed: ").append(e);
+            }
+            return sb.toString();
         }
 
         /** Installed browsers as [{label, package}]. */

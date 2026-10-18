@@ -60,6 +60,7 @@
         launch: (p) => { console.log("launch", p); window.__lastLaunch = p; return true; },
         openUrl: (u) => { console.log("openUrl", u); window.__lastUrl = u; },
         appInfo: (p) => console.log("appInfo", p),
+        profilesInfo: () => "This copy runs as: UserHandle{0}\nProfiles visible through the launcher service: 1\n  UserHandle{0} (this one): 42 launchable apps",
         browsers: () => JSON.stringify([{ label: "Brave", package: "com.brave.browser" }, { label: "Chrome", package: "com.android.chrome" }, { label: "Firefox", package: "org.mozilla.firefox" }]),
         openUrlIn: (u, p) => { console.log("openUrlIn", u, p); window.__lastUrl = u; window.__lastBrowser = p; },
         uninstall: (p) => console.log("uninstall", p),
