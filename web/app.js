@@ -1273,7 +1273,11 @@ function settingsMenu() {
             "\nApp scan (last, background): " + perf.listApps + (typeof A.scanInfo === "function" ? "\n   " + A.scanInfo() : "") +
             "\nUsage query (last): " + perf.usageStats + "\nAgenda ready after: " + perf.agenda + "\nWeather ready after: " + perf.weather +
             "\nApp list up to date at: " + perf.ready) },
-        { label: "Restore from pasted backup…", run: restoreForm },
+        { label: "Copy categories to clipboard (for another device)", run: () => {
+            try { A.copyText(JSON.stringify(categoriesExport())); toast("Categories copied — paste them on the other device"); } catch (e) { toast("Copy failed"); }
+        } },
+        { label: "Import categories from paste…", run: importCategoriesForm },
+        { label: "Restore everything from pasted backup…", run: restoreForm },
         { label: "Reset all organisation", danger: true, run: () => confirmSheet("Delete all categories, shortcuts and settings and start over?", "Reset", () => {
             const ai = state.ai;
             state = newState();
@@ -1289,6 +1293,124 @@ function settingsMenu() {
             run: () => { try { A.openUsageSettings(); } catch (e) { /* ignore */ } } });
     }
     sheet("Settings", buttons);
+}
+
+// ------------------------------------------------- categories: copy to / import from another device ----
+// Categories only. Same-named categories merge, categories only on this device stay untouched, categories only
+// in the paste are created. Apps are matched by package (missing ones are skipped); shortcuts are matched by
+// address and created here when missing.
+
+const urlKey = (u) => String(u || "").trim().replace(/\/+$/, "").toLowerCase();
+const safeUrl = (u) => /^(https?|market|intent|[a-z][a-z0-9+.-]*):/i.test(u) && !/^(javascript|data|file|blob|content):/i.test(u);
+const safeIcon = (i) => (typeof i === "string" && (/^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(i) || /^icons\/[\w\-./]+\.(png|jpe?g|webp|svg)$/i.test(i))) ? i : "";
+
+function categoriesExport() {
+    const names = new Map(state.categories.map((c) => [c.id, c.name]));
+    return {
+        v: 1, kind: "categories",
+        categories: state.categories.map((c) => ({ name: c.name })),
+        items: state.items.filter((i) => catOf(i)).map((i) => {
+            const o = { type: i.type, label: i.label, cat: names.get(i.catId) };
+            if (i.type === "app") o.pkg = i.pkg;
+            else { o.url = i.url; if (i.icon) o.icon = i.icon; if (i.kw) o.kw = i.kw; }
+            return o;
+        })
+    };
+}
+
+// Reads a category export or a full backup. Returns { cats: [names], entries: [{ cat, item }] }.
+function parseCategoryPaste(text) {
+    const s = JSON.parse(String(text).trim());
+    if (!s || !Array.isArray(s.categories) || !Array.isArray(s.items)) throw new Error("not a category export or backup");
+    const byId = new Map(s.categories.map((c) => [c && c.id, c && c.name]));
+    const cats = [];
+    s.categories.forEach((c) => { const n = normName(c && c.name); if (n && !cats.some((x) => x.toLowerCase() === n.toLowerCase())) cats.push(n); });
+    const entries = [];
+    s.items.forEach((i) => {
+        if (!i || typeof i !== "object") return;
+        const cat = normName(i.cat != null ? i.cat : byId.get(i.catId));
+        if (!cat) return;
+        if (!cats.some((x) => x.toLowerCase() === cat.toLowerCase())) cats.push(cat);
+        entries.push({ cat, item: i });
+    });
+    return { cats, entries };
+}
+
+// Works out (and, with apply=true, performs) the import. moveSorted: also move apps that already sit in another category here.
+function importCategories(text, moveSorted, apply) {
+    const p = parseCategoryPaste(text);
+    const sum = { newCats: 0, mergedCats: 0, assigned: 0, unchanged: 0, keptElsewhere: 0, appsMissing: 0, linksCreated: 0, linksBad: 0 };
+    const has = (n) => state.categories.some((c) => c.name.toLowerCase() === n.toLowerCase());
+    const catRef = new Map();          // lower-case name -> category (a stand-in object while only previewing)
+    p.cats.forEach((n) => {
+        const key = n.toLowerCase();
+        if (has(n)) sum.mergedCats++; else sum.newCats++;
+        catRef.set(key, apply ? ensureCat(n) : (state.categories.find((c) => c.name.toLowerCase() === key) || { id: "preview:" + key, name: n }));
+    });
+    const apps = new Map(state.items.filter((i) => i.type === "app").map((i) => [i.pkg, i]));
+    const links = new Map(state.items.filter((i) => i.type === "link").map((i) => [urlKey(i.url), i]));
+    const place = (dev, cat) => {
+        if (dev.catId === cat.id) { sum.unchanged++; return; }
+        if (dev.catId && catOf(dev) && !moveSorted) { sum.keptElsewhere++; return; }
+        sum.assigned++;
+        if (apply) dev.catId = cat.id;
+    };
+    for (const e of p.entries) {
+        const cat = catRef.get(e.cat.toLowerCase());
+        const i = e.item;
+        if (i.type === "app") {
+            const dev = apps.get(i.pkg);
+            if (!dev) { sum.appsMissing++; continue; }          // not installed on this device: ignored
+            place(dev, cat);
+        } else if (i.type === "link") {
+            const url = normUrl(i.url);
+            if (!url || !safeUrl(url)) { sum.linksBad++; continue; }
+            const dev = links.get(urlKey(url));
+            if (dev) { place(dev, cat); continue; }
+            sum.linksCreated++;
+            if (apply) {
+                const n = { id: "s:" + uid(), type: "link", label: String(i.label || url).slice(0, 60), url, catId: cat.id, page: 0 };
+                const ic = safeIcon(i.icon);
+                if (ic) n.icon = ic;
+                if (typeof i.kw === "string" && i.kw) n.kw = i.kw.slice(0, 200);
+                state.items.push(n);
+                links.set(urlKey(url), n);
+            }
+        }
+    }
+    return sum;
+}
+
+function importSummary(m) {
+    const lines = [
+        m.newCats + " new categor" + (m.newCats === 1 ? "y" : "ies") + " created, " + m.mergedCats + " merged with existing ones",
+        m.assigned + " app/shortcut" + (m.assigned === 1 ? "" : "s") + " placed in a category",
+        m.linksCreated + " shortcut" + (m.linksCreated === 1 ? "" : "s") + " created"
+    ];
+    if (m.unchanged) lines.push(m.unchanged + " already in the right category");
+    if (m.keptElsewhere) lines.push(m.keptElsewhere + " left in their current category");
+    if (m.appsMissing) lines.push(m.appsMissing + " app" + (m.appsMissing === 1 ? "" : "s") + " not installed here, ignored");
+    if (m.linksBad) lines.push(m.linksBad + " shortcut" + (m.linksBad === 1 ? "" : "s") + " skipped (unusable address)");
+    return lines.join("\n");
+}
+
+function importCategoriesForm() {
+    form("Import categories", [
+        { id: "text", label: "Paste the text copied with “Copy categories to clipboard” (a full backup works too)", type: "textarea", rows: 7 },
+        { id: "moveSorted", label: "Also move apps that are already in another category on this device", type: "checkbox", value: true }
+    ], "Import", (v) => {
+        try {
+            const m = importCategories(v.text, v.moveSorted, true);
+            commit();
+            toast(importSummary(m).split("\n").slice(0, 3).join(" · "), 6000);
+        } catch (e) {
+            toast("That doesn't look like a category export or backup");
+            return false;
+        }
+    }, [{ label: "Preview", run: (v, say) => {
+        try { say(importSummary(importCategories(v.text, v.moveSorted, false))); }
+        catch (e) { say("That doesn't look like a category export or backup."); }
+    } }]);
 }
 
 function restoreForm() {
