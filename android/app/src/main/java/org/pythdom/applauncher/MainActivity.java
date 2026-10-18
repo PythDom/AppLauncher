@@ -310,6 +310,38 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** Profiles of this user as the launcher service lists them plus those the user service reports. */
+    private List<UserHandle> allProfiles() {
+        List<UserHandle> out = new ArrayList<>();
+        try {
+            LauncherApps la = (LauncherApps) getSystemService(Context.LAUNCHER_APPS_SERVICE);
+            out.addAll(la.getProfiles());
+        } catch (Exception e) {
+            // keep going with the user service
+        }
+        try {
+            UserManager um = (UserManager) getSystemService(Context.USER_SERVICE);
+            for (UserHandle h : um.getUserProfiles()) if (!out.contains(h)) out.add(h);
+        } catch (Exception e) {
+            // nothing more
+        }
+        return out;
+    }
+
+    /** "work" for an Android work profile, "other" for anything else (e.g. Secure Folder). */
+    private String profileKind(UserHandle h) {
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 31) {
+                LauncherApps la = (LauncherApps) getSystemService(Context.LAUNCHER_APPS_SERVICE);
+                android.content.pm.LauncherUserInfo info = la.getLauncherUserInfo(h);
+                if (info != null && String.valueOf(info.getUserType()).toUpperCase(Locale.ROOT).contains("MANAGED")) return "work";
+            }
+        } catch (Exception e) {
+            // unknown type
+        }
+        return "other";
+    }
+
     /** First launcher activity of a package in another profile, or null. */
     private LauncherActivityInfo profileActivity(String pkg, long serial) {
         try {
@@ -575,11 +607,18 @@ public class MainActivity extends Activity {
             try {
                 LauncherApps la = (LauncherApps) getSystemService(Context.LAUNCHER_APPS_SERVICE);
                 UserManager um = (UserManager) getSystemService(Context.USER_SERVICE);
-                for (UserHandle h : la.getProfiles()) {
+                for (UserHandle h : allProfiles()) {
                     if (h.equals(android.os.Process.myUserHandle())) continue;
                     long serial = um.getSerialNumberForUser(h);
+                    String kind = profileKind(h);
                     Set<String> seenHere = new HashSet<>();
-                    for (LauncherActivityInfo lai : la.getActivityList(null, h)) {
+                    List<LauncherActivityInfo> inProfile;
+                    try {
+                        inProfile = la.getActivityList(null, h);
+                    } catch (Exception e) {
+                        continue;                       // this profile is not open to launchers
+                    }
+                    for (LauncherActivityInfo lai : inProfile) {
                         String pkg = lai.getApplicationInfo().packageName;
                         if (pkg.equals(getPackageName()) || !seenHere.add(pkg)) continue;
                         long stamp = 0;
@@ -596,7 +635,7 @@ public class MainActivity extends Activity {
                         if (label == null) label = String.valueOf(lai.getLabel());
                         else cached++;
                         next.put(key, label);
-                        rows.add(new String[]{label, pkg, String.valueOf(serial)});
+                        rows.add(new String[]{label, pkg, serial + ":" + kind});
                     }
                 }
             } catch (Exception e) {
@@ -608,7 +647,11 @@ public class MainActivity extends Activity {
                 JSONObject o = new JSONObject();
                 o.put("label", r[0]);
                 o.put("package", r[1]);
-                if (!r[2].isEmpty()) o.put("user", Long.parseLong(r[2]));
+                if (!r[2].isEmpty()) {
+                    String[] uk = r[2].split(":");
+                    o.put("user", Long.parseLong(uk[0]));
+                    o.put("kind", uk.length > 1 ? uk[1] : "other");
+                }
                 arr.put(o);
             }
             saveLabelCache(next);
@@ -700,18 +743,24 @@ public class MainActivity extends Activity {
                 sb.append("Default home app: ").append(isDefaultHome() ? "yes" : "no").append("\n");
                 UserManager um = (UserManager) getSystemService(Context.USER_SERVICE);
                 LauncherApps la = (LauncherApps) getSystemService(Context.LAUNCHER_APPS_SERVICE);
-                List<UserHandle> profiles = la.getProfiles();
-                sb.append("Profiles visible through the launcher service: ").append(profiles.size()).append("\n");
-                for (UserHandle h : profiles) {
+                List<UserHandle> viaLauncher = la.getProfiles();
+                sb.append("Profiles via the launcher service: ").append(viaLauncher.size()).append("\n");
+                sb.append("Profiles via the user service: ").append(um.getUserProfiles().size()).append("\n");
+                for (UserHandle h : allProfiles()) {
                     String n;
                     try {
-                        n = String.valueOf(la.getActivityList(null, h).size());
+                        List<LauncherActivityInfo> l = la.getActivityList(null, h);
+                        StringBuilder names = new StringBuilder();
+                        for (int k = 0; k < l.size() && k < 4; k++) names.append(k == 0 ? "" : ", ").append(l.get(k).getLabel());
+                        n = l.size() + " launchable apps" + (l.isEmpty() ? "" : " (" + names + ", …)");
                     } catch (Exception e) {
-                        n = "refused (" + e.getClass().getSimpleName() + ")";
+                        n = "REFUSED: " + e.getClass().getSimpleName() + " " + e.getMessage();
                     }
-                    sb.append("  ").append(h).append(h.equals(android.os.Process.myUserHandle()) ? " (this one)" : "").append(": ").append(n).append(" launchable apps\n");
+                    sb.append("  ").append(h).append(h.equals(android.os.Process.myUserHandle()) ? " (this one)" : "")
+                            .append(" serial ").append(um.getSerialNumberForUser(h))
+                            .append(", type ").append(profileKind(h)).append(viaLauncher.contains(h) ? "" : ", hidden from launcher service")
+                            .append(": ").append(n).append("\n");
                 }
-                sb.append("Profiles visible through the user service: ").append(um.getUserProfiles().size()).append("\n");
             } catch (Exception e) {
                 sb.append("Check failed: ").append(e);
             }

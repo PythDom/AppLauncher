@@ -54,8 +54,8 @@
     }
 
     window.Android = {
-        listApps: () => JSON.stringify(apps.concat([{ label: "Secure Notes", package: "com.samsung.android.app.notes", user: 150 }, { label: "Gallery", package: "com.sec.android.gallery3d", user: 150 }])),
-        listAppsAsync: (id) => setTimeout(() => window.__nativeResult(id, JSON.stringify(apps.concat([{ label: "Secure Notes", package: "com.samsung.android.app.notes", user: 150 }, { label: "Gallery", package: "com.sec.android.gallery3d", user: 150 }]))), 1500),   // slow on purpose
+        listApps: () => JSON.stringify(apps.concat([{ label: "Secure Notes", package: "com.samsung.android.app.notes", user: 150, kind: "other" }, { label: "Work Mail", package: "com.microsoft.office.outlook", user: 10, kind: "work" }])),
+        listAppsAsync: (id) => setTimeout(() => window.__nativeResult(id, JSON.stringify(apps.concat([{ label: "Secure Notes", package: "com.samsung.android.app.notes", user: 150, kind: "other" }, { label: "Work Mail", package: "com.microsoft.office.outlook", user: 10, kind: "work" }]))), 1500),   // slow on purpose
         scanInfo: () => "query 12 ms, labels 3 ms (42 of 42 from cache)",
         launch: (p) => { console.log("launch", p); window.__lastLaunch = p; return true; },
         launchUser: (p, u) => { window.__lastLaunch = p + "#u" + u; return true; },

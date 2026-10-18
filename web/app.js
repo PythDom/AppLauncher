@@ -75,22 +75,24 @@ function reconcile(appsIn) {
         const k = appKey(a.package, a.user);
         if (!have.has(k)) {
             const it = { id: "a:" + k, type: "app", pkg: a.package, label: a.label, catId: null, page: 0 };
-            if (a.user) it.user = a.user;
+            if (a.user) { it.user = a.user; it.kind = a.kind || "other"; }
             state.items.push(it);
             added++;
         }
     }
     for (const i of state.items) {
-        if (i.type === "app" && !i.customLabel) {
+        if (i.type === "app") {
             const a = byKey.get(itemKey(i));
-            if (a) i.label = a.label;
+            if (a && !i.customLabel) i.label = a.label;
+            if (a && i.user) i.kind = a.kind || "other";
         }
     }
     return { added, removed };
 }
 
 // What a tile or list row shows: apps of another profile carry a lock so they are told apart from this profile's copy.
-const shownLabel = (i) => (i.type === "app" && i.user ? i.label + " 🔒" : i.label);
+// 💼 = work profile, 🔒 = any other profile (Secure Folder).
+const shownLabel = (i) => (i.type === "app" && i.user ? i.label + (i.kind === "work" ? " 💼" : " 🔒") : i.label);
 
 // ------------------------------------------------------------- helpers ----
 
@@ -1302,7 +1304,7 @@ function settingsMenu() {
             copy.ai.key = "";
             try { A.copyText(JSON.stringify(copy)); toast("Backup copied (without the AI key)"); } catch (e) { toast("Copy failed"); }
         } },
-        { label: state.noProfiles ? "Show apps from other profiles (Secure Folder / work)" : "Hide apps from other profiles (Secure Folder / work)",
+        { label: state.noProfiles ? "Show apps from other profiles (work / Secure Folder)" : "Hide apps from other profiles (work / Secure Folder)",
             run: () => { state.noProfiles = !state.noProfiles; const r = reconcile(); commit(); toast(state.noProfiles ? "Other profiles hidden" : "Rescanning…"); if (!state.noProfiles) scanAndReconcile(() => commit()); } },
         { label: "Check Secure Folder / work profile access…", run: () => resultCard("Profiles this app can see",
             "If only one profile is listed, Android does not let this launcher list or open apps from the Secure Folder.",
