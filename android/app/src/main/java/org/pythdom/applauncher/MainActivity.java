@@ -331,10 +331,12 @@ public class MainActivity extends Activity {
     /** "work" for an Android work profile, "other" for anything else (e.g. Secure Folder). */
     private String profileKind(UserHandle h) {
         try {
-            if (android.os.Build.VERSION.SDK_INT >= 31) {
-                LauncherApps la = (LauncherApps) getSystemService(Context.LAUNCHER_APPS_SERVICE);
-                android.content.pm.LauncherUserInfo info = la.getLauncherUserInfo(h);
-                if (info != null && String.valueOf(info.getUserType()).toUpperCase(Locale.ROOT).contains("MANAGED")) return "work";
+            LauncherApps la = (LauncherApps) getSystemService(Context.LAUNCHER_APPS_SERVICE);
+            // getLauncherUserInfo is not in the public SDK, so it is called by reflection and may simply be absent
+            Object info = LauncherApps.class.getMethod("getLauncherUserInfo", UserHandle.class).invoke(la, h);
+            if (info != null) {
+                Object type = info.getClass().getMethod("getUserType").invoke(info);
+                if (String.valueOf(type).toUpperCase(Locale.ROOT).contains("MANAGED")) return "work";
             }
         } catch (Exception e) {
             // unknown type
