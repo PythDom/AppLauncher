@@ -85,6 +85,9 @@ header button { width: 40px; height: 40px; font-size: 20px; border-radius: 50%; 
 .wcard { margin: 8px 0; padding: 6px 10px 10px; background: var(--card); border: 1px solid var(--line); border-radius: 22px;
          box-shadow: 0 1px 3px rgba(0,0,0,.10); }
 .wh { display: flex; align-items: center; gap: 8px; padding: 6px 2px 4px; }
+.wcard.shut .wh button { display: none; }
+.wcard.shut { padding-bottom: 4px; }
+.wh .wt { user-select: none; -webkit-user-select: none; }
 .wh .wt { flex: 1; font-size: 15px; font-weight: 700; }
 .wh button { width: 34px; height: 34px; padding: 0; font-size: 18px; border-radius: 50%; border: 1px solid var(--line);
              background: var(--tile); color: var(--text); }

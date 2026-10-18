@@ -2244,13 +2244,23 @@ async function loadWeather(force) {
     renderWeather();
 }
 
+function wxTitleText() {
+    const wx = state.wx;
+    let txt = (dashOpen.wx ? "▾ " : "▸ ") + "Weather" + (wx ? " · " + wx.place : "");
+    if (!dashOpen.wx && wx && wx.data && wx.data.current) {      // collapsed: last known reading, no network
+        const c = wx.data.current;
+        txt += "   " + wmo(c.weather_code, c.is_day)[0] + " " + Math.round(c.temperature_2m) + "°";
+    }
+    return txt;
+}
+
 function renderWeather() {
     const body = $("wxBody");
     if (!body) return;
     body.innerHTML = "";
     const wx = state.wx;
     const t = $("wxTitle");
-    if (t) t.textContent = "Weather" + (wx ? " · " + wx.place : "");
+    if (t) t.textContent = wxTitleText();
     if (!wx) {
         const e = document.createElement("div");
         e.className = "empty";
@@ -2444,17 +2454,39 @@ function renderDock(body) {
 
 // ---------------------------------------------------------------- page ----
 
+// Agenda and weather load only when their card is opened (calendar queries, the location fix and the
+// network request are what made start-up slow). The clocks and the favourites bar are instant.
+const dashOpen = { agenda: false, wx: false };
+
+function foldable(card, key, onOpen) {
+    const apply = () => {
+        card.card.classList.toggle("shut", !dashOpen[key]);
+        card.body.hidden = !dashOpen[key];
+    };
+    card.title.onclick = () => {
+        dashOpen[key] = !dashOpen[key];
+        apply();
+        if (key === "agenda") card.title.textContent = (dashOpen.agenda ? "▾ " : "▸ ") + "Agenda";
+        else renderWeather();
+        if (dashOpen[key]) onOpen();
+    };
+    card.title.style.cursor = "pointer";
+    apply();
+}
+
 function renderDash(el) {
     el.innerHTML = "";
     const time = dashCard("Time", [["⚙", editZones, "Choose the time zones"]]);
     time.body.id = "timeBody";
-    const ag = dashCard("Agenda", [["⋯", agendaMenu, "Calendars and links"]]);
+    const ag = dashCard((dashOpen.agenda ? "▾ " : "▸ ") + "Agenda", [["⋯", agendaMenu, "Calendars and links"]]);
     ag.body.id = "agendaBody";
     const wx = dashCard("Weather", [["⋯", weatherMenu, "Weather options"]]);
     wx.body.id = "wxBody";
     wx.title.id = "wxTitle";
     const dk = dashCard("Favourites", []);
     dk.body.id = "dockBody";
+    foldable(ag, "agenda", () => loadAgenda(false));
+    foldable(wx, "wx", () => loadWeather(false));
     el.append(time.card, ag.card, wx.card, dk.card);
     renderDock(dk.body);
     renderTime(time.body);
@@ -2463,8 +2495,8 @@ function renderDash(el) {
 }
 
 function refreshDash(force) {
-    loadAgenda(!!force);
-    loadWeather(!!force);
+    if (dashOpen.agenda) loadAgenda(!!force);       // only what is open is fetched
+    if (dashOpen.wx) loadWeather(!!force);
     const tb = $("timeBody");
     if (tb) renderTime(tb);
 }
