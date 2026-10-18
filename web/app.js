@@ -921,24 +921,24 @@ const SECURE_ICON = "data:image/svg+xml;utf8," + encodeURIComponent('<svg xmlns=
 function openSecureLauncher() {
     if (typeof A.openLauncherInSecure !== "function") { toast("Not available in this version"); return; }
     toast("Asking Android to start the Secure Folder launcher…", 2500);
-    nativeDirect("openLauncherInSecure").then((r) => {
-        const facts = (r && r.info) ? "\n\n" + r.info : "";
-        if (r && r.ok) {      // accepted: if nothing appears, the Secure Folder is probably locked or the app is not installed there
-            setTimeout(() => { if (document.visibilityState === "visible") sheet("Android accepted the request (via the " + (r.via || "system") + ") but the Secure Folder launcher did not come to the front.\n" +
-                "Unlock the Secure Folder first, and check AppLauncher is installed inside it." + facts, [
-                { label: "Open the Secure Folder app", run: () => { try { A.launch("com.samsung.knox.securefolder"); } catch (e) { toast("Secure Folder app not found"); } } }
-            ]); }, 1500);
-            return;
-        }
-        sheet("The launcher could not be started in the Secure Folder.\n" + ((r && r.error) || "") + facts +
-            "\n\nCheck that AppLauncher is installed inside the Secure Folder. You can open the Secure Folder itself instead.", [
+    // "Accepted" is not proof: if this page is still in front a moment later, nothing opened and the next route is tried.
+    const cameForward = () => new Promise((res) => setTimeout(() => res(document.visibilityState !== "visible"), 1500));
+    const describe = (name, r) => name + ": " + (r && r.ok ? "accepted by Android, but nothing opened" : "refused") + "\n" +
+        ((r && (r.error || r.info)) ? [r.info, r.error].filter(Boolean).join("\n") + "\n" : "");
+    (async () => {
+        const r0 = await nativeDirect("openLauncherInSecure", 0);
+        if (r0 && r0.ok && await cameForward()) return;
+        const r1 = await nativeDirect("openLauncherInSecure", 1);
+        if (r1 && r1.ok && await cameForward()) return;
+        sheet("The launcher did not open in the Secure Folder.\n\n" + describe("1) Launcher service", r0) + "\n" + describe("2) Cross-profile service", r1) +
+            "\nBoth routes were tried. You can open the Secure Folder itself instead.", [
             { label: "Open the Secure Folder app", run: () => {
                 let ok = false;
                 try { ok = A.launch("com.samsung.knox.securefolder"); } catch (e) { /* ignore */ }
                 if (!ok) toast("Secure Folder app not found");
             } }
         ]);
-    });
+    })();
 }
 
 function addSecureShortcut() {

@@ -58,7 +58,7 @@
         listAppsAsync: (id) => setTimeout(() => window.__nativeResult(id, JSON.stringify(apps.concat([{ label: "Secure Notes", package: "com.samsung.android.app.notes", user: 150, kind: "other" }, { label: "Work Mail", package: "com.microsoft.office.outlook", user: 10, kind: "work" }]))), 1500),   // slow on purpose
         scanInfo: () => "query 12 ms, labels 3 ms (42 of 42 from cache)",
         launch: (p) => { console.log("launch", p); window.__lastLaunch = p; return true; },
-        openLauncherInSecure: (id) => setTimeout(() => window.__nativeResult(id, JSON.stringify(window.__secureOk ? { ok: true, via: "launcher service", info: "profile 150: package enabled there = true, launcher activity enabled = true, user unlocked = false" } : { ok: false, error: "profile 150 via launcher service: SecurityException Cannot start activity for unrelated profile" })), 100),
+        openLauncherInSecure: (id, route) => setTimeout(() => window.__nativeResult(id, JSON.stringify(window.__secureOk ? { ok: true, route, info: "profile 150: package enabled there = false" } : { ok: false, route, error: "profile 150: SecurityException not allowed" })), 100),
         launchUser: (p, u) => { window.__lastLaunch = p + "#u" + u; return true; },
         openUrl: (u) => { console.log("openUrl", u); window.__lastUrl = u; },
         appInfo: (p) => console.log("appInfo", p),

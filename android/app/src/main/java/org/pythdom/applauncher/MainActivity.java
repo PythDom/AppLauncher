@@ -770,15 +770,14 @@ public class MainActivity extends Activity {
         }
 
         /**
-         * Starts this launcher's own copy in another profile (the Secure Folder). Two Android routes are tried per profile:
-         * the launcher service, then the cross-profile service. Answers {ok} or {ok:false, error} via __nativeResult.
+         * Starts this launcher's own copy in another profile (the Secure Folder). route 0 = launcher service,
+         * route 1 = cross-profile service. Answers {ok, route, info, error} via __nativeResult.
          */
         @JavascriptInterface
-        public void openLauncherInSecure(final int id) {
+        public void openLauncherInSecure(final int id, final int route) {
             runOnUiThread(() -> {
                 StringBuilder errors = new StringBuilder();
                 StringBuilder info = new StringBuilder();
-                String via = "";
                 boolean started = false;
                 ComponentName self = new ComponentName(getPackageName(), MainActivity.class.getName());
                 try {
@@ -790,29 +789,32 @@ public class MainActivity extends Activity {
                         if (h.equals(android.os.Process.myUserHandle()) || "work".equals(profileKind(h))) continue;
                         tried++;
                         String tag = "profile " + um.getSerialNumberForUser(h);
-                        try {
-                            info.append(tag).append(": package enabled there = ").append(la.isPackageEnabled(getPackageName(), h))
-                                    .append(", launcher activity enabled = ").append(la.isActivityEnabled(self, h))
-                                    .append(", user unlocked = ").append(um.isUserUnlocked(h)).append("\n");
-                        } catch (Exception e) {
-                            info.append(tag).append(": facts unavailable (").append(e.getClass().getSimpleName()).append(")\n");
-                        }
-                        try {
-                            la.startMainActivity(self, h, null, null);
-                            started = true;
-                            via = "launcher service";
-                        } catch (Exception e) {
-                            errors.append(tag).append(" via launcher service: ").append(e.getClass().getSimpleName()).append(" ").append(e.getMessage()).append("\n");
-                        }
-                        if (!started && android.os.Build.VERSION.SDK_INT >= 30) {
+                        if (route == 0) {
+                            try {
+                                info.append(tag).append(": package enabled there = ").append(la.isPackageEnabled(getPackageName(), h))
+                                        .append(", launcher activity enabled = ").append(la.isActivityEnabled(self, h))
+                                        .append(", user unlocked = ").append(um.isUserUnlocked(h)).append("\n");
+                            } catch (Exception e) {
+                                info.append(tag).append(": facts unavailable (").append(e.getClass().getSimpleName()).append(")\n");
+                            }
+                            try {
+                                la.startMainActivity(self, h, null, null);
+                                started = true;
+                            } catch (Exception e) {
+                                errors.append(tag).append(": ").append(e.getClass().getSimpleName()).append(" ").append(e.getMessage()).append("\n");
+                            }
+                        } else if (android.os.Build.VERSION.SDK_INT >= 30) {
                             try {
                                 android.content.pm.CrossProfileApps cp = (android.content.pm.CrossProfileApps) getSystemService(Context.CROSS_PROFILE_APPS_SERVICE);
+                                info.append(tag).append(": offered by the cross-profile service = ").append(cp.getTargetUserProfiles().contains(h))
+                                        .append(", may interact = ").append(cp.canInteractAcrossProfiles()).append("\n");
                                 cp.startMainActivity(self, h);
                                 started = true;
-                                via = "cross-profile service";
                             } catch (Exception e) {
-                                errors.append(tag).append(" via cross-profile service: ").append(e.getClass().getSimpleName()).append(" ").append(e.getMessage()).append("\n");
+                                errors.append(tag).append(": ").append(e.getClass().getSimpleName()).append(" ").append(e.getMessage()).append("\n");
                             }
+                        } else {
+                            errors.append("cross-profile service needs Android 11 or newer\n");
                         }
                     }
                     if (tried == 0) errors.append("No Secure Folder profile is visible to this app.\n");
@@ -822,7 +824,7 @@ public class MainActivity extends Activity {
                 try {
                     JSONObject o = new JSONObject();
                     o.put("ok", started);
-                    o.put("via", via);
+                    o.put("route", route);
                     o.put("info", info.toString().trim());
                     if (!started) o.put("error", errors.toString().trim());
                     nativeResult(id, o.toString());
