@@ -87,7 +87,9 @@ public class MainActivity extends Activity {
     private FrameLayout root;
     private ValueCallback<Uri[]> filePathCallback;
     private final Map<String, byte[]> icons = new HashMap<>();
-    private final Map<String, String> labels = new HashMap<>();   // app labels never change within a process
+    private Map<String, String> labelCache = new HashMap<>();     // "pkg@apkModified" -> label, kept on disk
+    private boolean labelsLoaded = false;
+    private String scanInfo = "";
     private String usageCache = "{}";
     private long usageAt = 0;
 
@@ -456,45 +458,112 @@ public class MainActivity extends Activity {
         super.onPause();
     }
 
+    private synchronized void loadLabelCache() {
+        if (labelsLoaded) return;
+        labelsLoaded = true;
+        try {
+            File f = new File(getFilesDir(), "labels.json");
+            if (!f.exists()) return;
+            JSONObject o = new JSONObject(new String(readAll(new FileInputStream(f)), StandardCharsets.UTF_8));
+            Iterator<String> keys = o.keys();
+            while (keys.hasNext()) {
+                String k = keys.next();
+                labelCache.put(k, o.getString(k));
+            }
+        } catch (Exception e) {
+            labelCache = new HashMap<>();
+        }
+    }
+
+    private synchronized void saveLabelCache(Map<String, String> next) {
+        if (next.equals(labelCache)) return;
+        labelCache = next;
+        try {
+            File tmp = new File(getFilesDir(), "labels.json.tmp");
+            OutputStream out = new FileOutputStream(tmp);
+            try {
+                out.write(new JSONObject(next).toString().getBytes(StandardCharsets.UTF_8));
+            } finally {
+                out.close();
+            }
+            File dst = new File(getFilesDir(), "labels.json");
+            if (!tmp.renameTo(dst)) {
+                dst.delete();
+                tmp.renameTo(dst);
+            }
+        } catch (Exception e) {
+            // the next scan simply recomputes the labels
+        }
+    }
+
+    /** Launchable apps as [{label, package}]. Loading a label is slow (it reads the app's resources), so labels
+     *  are cached on disk by package + apk modification time and only new or updated apps are read. */
+    private String scanApps() {
+        try {
+            long t0 = System.currentTimeMillis();
+            loadLabelCache();
+            PackageManager pm = getPackageManager();
+            Intent main = new Intent(Intent.ACTION_MAIN, null);
+            main.addCategory(Intent.CATEGORY_LAUNCHER);
+            List<ResolveInfo> found = pm.queryIntentActivities(main, 0);
+            long t1 = System.currentTimeMillis();
+            Map<String, String> next = new HashMap<>();
+            List<String[]> rows = new ArrayList<>();
+            Set<String> seen = new HashSet<>();
+            int cached = 0;
+            for (ResolveInfo ri : found) {
+                String pkg = ri.activityInfo.packageName;
+                if (pkg.equals(getPackageName()) || !seen.add(pkg)) continue;
+                long stamp = 0;
+                try {
+                    stamp = new File(ri.activityInfo.applicationInfo.sourceDir).lastModified();
+                } catch (Exception e) {
+                    // no stamp: the label is simply reloaded
+                }
+                String key = pkg + "@" + stamp;
+                String label;
+                synchronized (this) {
+                    label = labelCache.get(key);
+                }
+                if (label == null) label = ri.loadLabel(pm).toString();
+                else cached++;
+                next.put(key, label);
+                rows.add(new String[]{label, pkg});
+            }
+            Collections.sort(rows, (a, b) -> a[0].compareToIgnoreCase(b[0]));
+            JSONArray arr = new JSONArray();
+            for (String[] r : rows) {
+                JSONObject o = new JSONObject();
+                o.put("label", r[0]);
+                o.put("package", r[1]);
+                arr.put(o);
+            }
+            saveLabelCache(next);
+            long t2 = System.currentTimeMillis();
+            scanInfo = "query " + (t1 - t0) + " ms, labels " + (t2 - t1) + " ms (" + cached + " of " + rows.size() + " from cache)";
+            return arr.toString();
+        } catch (Exception e) {
+            return "[]";
+        }
+    }
+
     /** window.Android.* — called from the page on a background thread. */
     public class Bridge {
 
         @JavascriptInterface
         public String listApps() {
-            try {
-                PackageManager pm = getPackageManager();
-                Intent main = new Intent(Intent.ACTION_MAIN, null);
-                main.addCategory(Intent.CATEGORY_LAUNCHER);
-                List<ResolveInfo> found = pm.queryIntentActivities(main, 0);
-                List<String[]> rows = new ArrayList<>();
-                Set<String> seen = new HashSet<>();
-                for (ResolveInfo ri : found) {
-                    String pkg = ri.activityInfo.packageName;
-                    if (pkg.equals(getPackageName()) || !seen.add(pkg)) continue;
-                    String label;
-                    synchronized (labels) {
-                        label = labels.get(pkg);
-                    }
-                    if (label == null) {
-                        label = ri.loadLabel(pm).toString();
-                        synchronized (labels) {
-                            labels.put(pkg, label);
-                        }
-                    }
-                    rows.add(new String[]{label, pkg});
-                }
-                Collections.sort(rows, (a, b) -> a[0].compareToIgnoreCase(b[0]));
-                JSONArray arr = new JSONArray();
-                for (String[] r : rows) {
-                    JSONObject o = new JSONObject();
-                    o.put("label", r[0]);
-                    o.put("package", r[1]);
-                    arr.put(o);
-                }
-                return arr.toString();
-            } catch (Exception e) {
-                return "[]";
-            }
+            return scanApps();
+        }
+
+        /** Same list, computed off the page's thread; the answer arrives through window.__nativeResult. */
+        @JavascriptInterface
+        public void listAppsAsync(final int id) {
+            new Thread(() -> nativeResult(id, scanApps())).start();
+        }
+
+        @JavascriptInterface
+        public String scanInfo() {
+            return scanInfo;
         }
 
         @JavascriptInterface

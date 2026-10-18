@@ -47,8 +47,8 @@ function installedApps() {
 }
 
 // Adds newly installed apps, drops uninstalled ones, refreshes labels.
-function reconcile() {
-    const apps = installedApps();
+function reconcile(appsIn) {
+    const apps = appsIn || installedApps();
     if (!apps.length) return { added: 0, removed: 0 };
     const byPkg = new Map(apps.map((a) => [a.package, a]));
     let added = 0, removed = 0;
@@ -1270,7 +1270,9 @@ function settingsMenu() {
         } },
         { label: "Speed report…", run: () => resultCard("Speed report (milliseconds)", "How long each start-up step took on this phone:",
             "Page + scripts loaded after: " + perf.pageLoad + "\nSaved state read: " + perf.loadState + "\nFirst screens drawn: " + perf.firstRender +
-            "\nApp scan (last): " + perf.listApps + "\nUsage query (last): " + perf.usageStats + "\nFully ready at: " + perf.ready) },
+            "\nApp scan (last, background): " + perf.listApps + (typeof A.scanInfo === "function" ? "\n   " + A.scanInfo() : "") +
+            "\nUsage query (last): " + perf.usageStats + "\nAgenda ready after: " + perf.agenda + "\nWeather ready after: " + perf.weather +
+            "\nApp list up to date at: " + perf.ready) },
         { label: "Restore from pasted backup…", run: restoreForm },
         { label: "Reset all organisation", danger: true, run: () => confirmSheet("Delete all categories, shortcuts and settings and start over?", "Reset", () => {
             const ai = state.ai;
@@ -1814,16 +1816,32 @@ window.__onHome = function () {
 
 window.__onResume = function () {
     if (!state) return;
-    const r = reconcile();
-    refreshUsage();
-    if (r.added || r.removed) {
-        commit();
-        toast(r.added + " new app" + (r.added === 1 ? "" : "s") + (r.removed ? ", " + r.removed + " removed" : ""));
-    } else {
-        renderUsage($("page1"));
-    }
+    scanAndReconcile((r) => {
+        if (r.added || r.removed) {
+            commit();
+            toast(r.added + " new app" + (r.added === 1 ? "" : "s") + (r.removed ? ", " + r.removed + " removed" : ""));
+        } else {
+            renderUsage($("page1"));
+        }
+    });
     if (pagerPage() === PAGE_DASH) refreshDash(false);
 };
+
+// The installed-app scan is slow on a big phone, so it runs on a native thread and the screen stays usable.
+let scanning = false;
+function scanAndReconcile(done) {
+    if (scanning) return;
+    if (typeof A.listAppsAsync !== "function") { const r = reconcile(); refreshUsage(); done(r); return; }
+    scanning = true;
+    const t = performance.now();
+    nativeDirect("listAppsAsync").then((apps) => {
+        scanning = false;
+        perf.listApps = Math.round(performance.now() - t);
+        const r = reconcile(Array.isArray(apps) ? apps : []);
+        refreshUsage();
+        done(r);
+    });
+}
 
 window.__onPause = flush;
 
@@ -1843,14 +1861,16 @@ window.__nativeResult = function (id, json) {
 
 // Android shows one permission dialog at a time (a second request is dropped), so calls run one after another.
 let nativeChain = Promise.resolve();
-function nativeCall(fn, ...args) {
-    const run = () => new Promise((resolve) => {
+function nativeDirect(fn, ...args) {
+    return new Promise((resolve) => {
         const id = ++nativeSeq;
         nativePending[id] = resolve;
         try { A[fn](id, ...args); }
         catch (e) { delete nativePending[id]; resolve({ error: String(e) }); }
     });
-    const p = nativeChain.then(run);
+}
+function nativeCall(fn, ...args) {
+    const p = nativeChain.then(() => nativeDirect(fn, ...args));
     nativeChain = p.catch(() => {});
     return p;
 }
@@ -2004,6 +2024,7 @@ async function icsText(f, force) {
 }
 
 async function loadAgenda(force) {
+    if (!force && agenda.at && Date.now() - agenda.at < 60000) { renderAgenda(); return; }
     const [from, to] = agendaWindow();
     const items = [];
     const notes = [];
@@ -2462,9 +2483,9 @@ function renderDock(body) {
 
 // ---------------------------------------------------------------- page ----
 
-// Agenda and weather load only when their card is opened (calendar queries, the location fix and the
-// network request are what made start-up slow). The clocks and the favourites bar are instant.
-const dashOpen = { agenda: false, wx: false };
+// Agenda and weather are open at start but fill in after the first screens are drawn; a card can be folded
+// with a tap on its title, and a folded card is not refreshed.
+const dashOpen = { agenda: true, wx: true };
 
 function foldable(card, key, onOpen) {
     const apply = () => {
@@ -2503,8 +2524,9 @@ function renderDash(el) {
 }
 
 function refreshDash(force) {
-    if (dashOpen.agenda) loadAgenda(!!force);       // only what is open is fetched
-    if (dashOpen.wx) loadWeather(!!force);
+    const t = performance.now();
+    if (dashOpen.agenda) loadAgenda(!!force).then(() => { perf.agenda = Math.round(performance.now() - t); });
+    if (dashOpen.wx) loadWeather(!!force).then(() => { perf.weather = Math.round(performance.now() - t); });
     const tb = $("timeBody");
     if (tb) renderTime(tb);
 }
@@ -2529,17 +2551,15 @@ function init() {
     const r = first ? reconcile() : { added: 0, removed: 0 };
     if (first) { refreshUsage(); flush(); }
     timed("firstRender", render);
-    if (!first) setTimeout(() => {
-        const r2 = reconcile();
-        refreshUsage();
+    if (!first) setTimeout(() => scanAndReconcile((r2) => {
         if (r2.added || r2.removed) { commit(); toast(r2.added + " new app" + (r2.added === 1 ? "" : "s") + (r2.removed ? ", " + r2.removed + " removed" : "")); }
         else { renderUsage($("page1")); renderCloud($("pageCloud")); }
         perf.ready = Math.round(performance.now());
-    }, 60);
+    }), 60);
     goPage(homePage(), false);                      // open on the dashboard: cloud | dashboard | categories | most used
     requestAnimationFrame(() => goPage(homePage(), false));
     lastPage = homePage();
-    if (homePage() === PAGE_DASH) refreshDash(false);
+    if (homePage() === PAGE_DASH) setTimeout(() => refreshDash(false), 400);   // after the first paint
     if (first) toast("Found " + r.added + " apps. ⋮ → Sort with AI, or long-press to organise.", 6000);
     if (!state.legacyImported) importLegacy(true);
 

@@ -55,6 +55,8 @@
 
     window.Android = {
         listApps: () => JSON.stringify(apps),
+        listAppsAsync: (id) => setTimeout(() => window.__nativeResult(id, JSON.stringify(apps)), 1500),   // slow on purpose
+        scanInfo: () => "query 12 ms, labels 3 ms (42 of 42 from cache)",
         launch: (p) => { console.log("launch", p); window.__lastLaunch = p; return true; },
         openUrl: (u) => { console.log("openUrl", u); window.__lastUrl = u; },
         appInfo: (p) => console.log("appInfo", p),
