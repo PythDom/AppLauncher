@@ -21,6 +21,8 @@ import android.provider.CalendarContract;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.content.ComponentName;
+import android.content.pm.LauncherActivityInfo;
 import android.content.pm.LauncherApps;
 import android.content.res.Configuration;
 import android.os.UserHandle;
@@ -242,10 +244,22 @@ public class MainActivity extends Activity {
         }
         try {
             long stamp = 0;
-            try {
-                stamp = getPackageManager().getPackageInfo(pkg, 0).lastUpdateTime;   // new file name after an app update
-            } catch (Exception e) {
-                // fall through: getApplicationIcon below decides whether the app exists
+            LauncherActivityInfo other = null;
+            int hash = pkg.indexOf("#u");
+            if (hash > 0) {                       // an app of another profile (Secure Folder / work): "package#u<serial>"
+                other = profileActivity(pkg.substring(0, hash), Long.parseLong(pkg.substring(hash + 2)));
+                if (other == null) return null;
+                try {
+                    stamp = new File(other.getApplicationInfo().sourceDir).lastModified();
+                } catch (Exception e) {
+                    // no stamp: cached until the app disappears
+                }
+            } else {
+                try {
+                    stamp = getPackageManager().getPackageInfo(pkg, 0).lastUpdateTime;   // new file name after an app update
+                } catch (Exception e) {
+                    // fall through: getApplicationIcon below decides whether the app exists
+                }
             }
             File dir = new File(getFilesDir(), "icons");
             dir.mkdirs();
@@ -259,7 +273,7 @@ public class MainActivity extends Activity {
                 }
             }
             if (png == null) {
-                Drawable d = getPackageManager().getApplicationIcon(pkg);
+                Drawable d = other != null ? other.getBadgedIcon(0) : getPackageManager().getApplicationIcon(pkg);
                 Bitmap bmp = Bitmap.createBitmap(ICON_PX, ICON_PX, Bitmap.Config.ARGB_8888);
                 Canvas canvas = new Canvas(bmp);
                 d.setBounds(0, 0, ICON_PX, ICON_PX);
@@ -291,6 +305,20 @@ public class MainActivity extends Activity {
                 icons.put(pkg, png);
             }
             return png;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** First launcher activity of a package in another profile, or null. */
+    private LauncherActivityInfo profileActivity(String pkg, long serial) {
+        try {
+            UserManager um = (UserManager) getSystemService(Context.USER_SERVICE);
+            UserHandle h = um.getUserForSerialNumber(serial);
+            if (h == null) return null;
+            LauncherApps la = (LauncherApps) getSystemService(Context.LAUNCHER_APPS_SERVICE);
+            List<LauncherActivityInfo> l = la.getActivityList(pkg, h);
+            return l.isEmpty() ? null : l.get(0);
         } catch (Exception e) {
             return null;
         }
@@ -541,7 +569,38 @@ public class MainActivity extends Activity {
                 if (label == null) label = ri.loadLabel(pm).toString();
                 else cached++;
                 next.put(key, label);
-                rows.add(new String[]{label, pkg});
+                rows.add(new String[]{label, pkg, ""});
+            }
+            // Apps of other profiles the system shows to launchers (work profile, Samsung Secure Folder).
+            try {
+                LauncherApps la = (LauncherApps) getSystemService(Context.LAUNCHER_APPS_SERVICE);
+                UserManager um = (UserManager) getSystemService(Context.USER_SERVICE);
+                for (UserHandle h : la.getProfiles()) {
+                    if (h.equals(android.os.Process.myUserHandle())) continue;
+                    long serial = um.getSerialNumberForUser(h);
+                    Set<String> seenHere = new HashSet<>();
+                    for (LauncherActivityInfo lai : la.getActivityList(null, h)) {
+                        String pkg = lai.getApplicationInfo().packageName;
+                        if (pkg.equals(getPackageName()) || !seenHere.add(pkg)) continue;
+                        long stamp = 0;
+                        try {
+                            stamp = new File(lai.getApplicationInfo().sourceDir).lastModified();
+                        } catch (Exception e) {
+                            // no stamp
+                        }
+                        String key = pkg + "#u" + serial + "@" + stamp;
+                        String label;
+                        synchronized (this) {
+                            label = labelCache.get(key);
+                        }
+                        if (label == null) label = String.valueOf(lai.getLabel());
+                        else cached++;
+                        next.put(key, label);
+                        rows.add(new String[]{label, pkg, String.valueOf(serial)});
+                    }
+                }
+            } catch (Exception e) {
+                // profiles not visible: only this profile's apps are listed
             }
             Collections.sort(rows, (a, b) -> a[0].compareToIgnoreCase(b[0]));
             JSONArray arr = new JSONArray();
@@ -549,6 +608,7 @@ public class MainActivity extends Activity {
                 JSONObject o = new JSONObject();
                 o.put("label", r[0]);
                 o.put("package", r[1]);
+                if (!r[2].isEmpty()) o.put("user", Long.parseLong(r[2]));
                 arr.put(o);
             }
             saveLabelCache(next);
@@ -577,6 +637,23 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public String scanInfo() {
             return scanInfo;
+        }
+
+        /** Opens an app that lives in another profile (Secure Folder / work); Android may ask for that profile's unlock. */
+        @JavascriptInterface
+        public boolean launchUser(String pkg, double serial) {
+            final LauncherActivityInfo info = profileActivity(pkg, (long) serial);
+            if (info == null) return false;
+            runOnUiThread(() -> {
+                try {
+                    LauncherApps la = (LauncherApps) getSystemService(Context.LAUNCHER_APPS_SERVICE);
+                    UserManager um = (UserManager) getSystemService(Context.USER_SERVICE);
+                    la.startMainActivity(info.getComponentName(), um.getUserForSerialNumber((long) serial), null, null);
+                } catch (Exception e) {
+                    Toast.makeText(MainActivity.this, "Could not open it (is the Secure Folder locked?)", Toast.LENGTH_SHORT).show();
+                }
+            });
+            return true;
         }
 
         @JavascriptInterface

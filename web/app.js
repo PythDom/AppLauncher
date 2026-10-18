@@ -47,31 +47,50 @@ function installedApps() {
 }
 
 // Adds newly installed apps, drops uninstalled ones, refreshes labels.
+// An app of this profile is keyed by its package; one living in another profile (Secure Folder, work) also by that
+// profile's number, because the same package can exist in both.
+const appKey = (pkg, user) => (user ? pkg + "#u" + user : pkg);
+const itemKey = (i) => appKey(i.pkg, i.user);
+
 function reconcile(appsIn) {
-    const apps = appsIn || installedApps();
+    let apps = appsIn || installedApps();
     if (!apps.length) return { added: 0, removed: 0 };
-    const byPkg = new Map(apps.map((a) => [a.package, a]));
     let added = 0, removed = 0;
+    if (state.noProfiles) {                       // user switched the other profiles off
+        apps = apps.filter((a) => !a.user);
+        const before = state.items.length;
+        state.items = state.items.filter((i) => !(i.type === "app" && i.user));
+        removed += before - state.items.length;
+    }
+    const byKey = new Map(apps.map((a) => [appKey(a.package, a.user), a]));
+    const usersSeen = new Set(apps.filter((a) => a.user).map((a) => a.user));
     state.items = state.items.filter((i) => {
-        if (i.type !== "app" || byPkg.has(i.pkg)) return true;
+        if (i.type !== "app" || byKey.has(itemKey(i))) return true;
+        if (i.user && !usersSeen.has(i.user)) return true;   // that profile listed nothing (locked?): keep its apps
         removed++;
         return false;
     });
-    const have = new Set(state.items.filter((i) => i.type === "app").map((i) => i.pkg));
+    const have = new Set(state.items.filter((i) => i.type === "app").map(itemKey));
     for (const a of apps) {
-        if (!have.has(a.package)) {
-            state.items.push({ id: "a:" + a.package, type: "app", pkg: a.package, label: a.label, catId: null, page: 0 });
+        const k = appKey(a.package, a.user);
+        if (!have.has(k)) {
+            const it = { id: "a:" + k, type: "app", pkg: a.package, label: a.label, catId: null, page: 0 };
+            if (a.user) it.user = a.user;
+            state.items.push(it);
             added++;
         }
     }
     for (const i of state.items) {
         if (i.type === "app" && !i.customLabel) {
-            const a = byPkg.get(i.pkg);
+            const a = byKey.get(itemKey(i));
             if (a) i.label = a.label;
         }
     }
     return { added, removed };
 }
+
+// What a tile or list row shows: apps of another profile carry a lock so they are told apart from this profile's copy.
+const shownLabel = (i) => (i.type === "app" && i.user ? i.label + " 🔒" : i.label);
 
 // ------------------------------------------------------------- helpers ----
 
@@ -97,7 +116,7 @@ function letterIcon(label) {
 
 function iconSrc(i) {
     if (i.icon) return i.icon;
-    if (i.type === "app") return "/icon/" + encodeURIComponent(i.pkg) + ".png";
+    if (i.type === "app") return "/icon/" + encodeURIComponent(itemKey(i)) + ".png";
     try { return "https://www.google.com/s2/favicons?domain=" + new URL(i.url).hostname + "&sz=128"; }
     catch (e) { return letterIcon(i.label); }
 }
@@ -171,7 +190,7 @@ function tile(item) {
     img.onerror = () => { img.onerror = null; img.src = letterIcon(item.label); };
     const l = document.createElement("div");
     l.className = "lbl";
-    l.textContent = item.label;
+    l.textContent = shownLabel(item);
     t.append(img, l);
     attachPress(t, () => onTap(item), () => onLong(item));
     return t;
@@ -350,7 +369,7 @@ function refreshUsage() {
 // Foreground time over the last 30 days (real usage, needs permission) plus launches made from here
 // (each counted as one minute), so shortcuts and the no-permission case still rank sensibly.
 function usageScore(i) {
-    const ms = i.type === "app" ? (usageMs[i.pkg] || 0) : 0;
+    const ms = i.type === "app" && !i.user ? (usageMs[i.pkg] || 0) : 0;
     return ms + ((state.launches || {})[i.id] || 0) * 60000;
 }
 
@@ -377,7 +396,7 @@ function renderUsage(el) {
     rankedItems().forEach((i) => {
         const r = document.createElement("div");
         r.className = "pl" + (selected.has(i.id) ? " sel" : "");
-        r.textContent = i.label;
+        r.textContent = shownLabel(i);
         attachPress(r, () => onTap(i), () => onLong(i));
         list.appendChild(r);
     });
@@ -899,7 +918,7 @@ function launch(item) {
     save();
     if (item.type === "app") {
         let ok = false;
-        try { ok = A.launch(item.pkg); } catch (e) { /* ignore */ }
+        try { ok = item.user && typeof A.launchUser === "function" ? A.launchUser(item.pkg, item.user) : A.launch(item.pkg); } catch (e) { /* ignore */ }
         if (!ok) toast("Could not open " + item.label);
     } else {
         try {
@@ -1176,9 +1195,9 @@ function itemSheet(item, word) {
             if (!l) return false;
             item.label = l; item.customLabel = true; commit();
         }) });
-        buttons.push({ label: "App info", run: () => { try { A.appInfo(item.pkg); } catch (e) { /* ignore */ } } });
+        if (!item.user) buttons.push({ label: "App info", run: () => { try { A.appInfo(item.pkg); } catch (e) { /* ignore */ } } });
         buttons.push({ label: "Hide from launcher", run: () => { setHidden(ids, true); toast("Hidden — bring it back via ＋ → Hidden app"); } });
-        buttons.push({ label: "Uninstall…", danger: true, run: () => { try { A.uninstall(item.pkg); } catch (e) { /* ignore */ } } });
+        if (!item.user) buttons.push({ label: "Uninstall…", danger: true, run: () => { try { A.uninstall(item.pkg); } catch (e) { /* ignore */ } } });
     } else {
         buttons.push({ label: "Edit shortcut", run: () => shortcutForm(item) });
         buttons.push({ label: "Remove shortcut", danger: true, run: () => confirmSheet("Remove “" + item.label + "”?", "Remove", () => {
@@ -1283,6 +1302,8 @@ function settingsMenu() {
             copy.ai.key = "";
             try { A.copyText(JSON.stringify(copy)); toast("Backup copied (without the AI key)"); } catch (e) { toast("Copy failed"); }
         } },
+        { label: state.noProfiles ? "Show apps from other profiles (Secure Folder / work)" : "Hide apps from other profiles (Secure Folder / work)",
+            run: () => { state.noProfiles = !state.noProfiles; const r = reconcile(); commit(); toast(state.noProfiles ? "Other profiles hidden" : "Rescanning…"); if (!state.noProfiles) scanAndReconcile(() => commit()); } },
         { label: "Check Secure Folder / work profile access…", run: () => resultCard("Profiles this app can see",
             "If only one profile is listed, Android does not let this launcher list or open apps from the Secure Folder.",
             typeof A.profilesInfo === "function" ? A.profilesInfo() : "Not available in this version.") },
@@ -1329,7 +1350,7 @@ function categoriesExport() {
         categories: state.categories.map((c) => ({ name: c.name })),
         items: state.items.filter((i) => catOf(i)).map((i) => {
             const o = { type: i.type, label: i.label, cat: names.get(i.catId) };
-            if (i.type === "app") o.pkg = i.pkg;
+            if (i.type === "app") { o.pkg = i.pkg; if (i.user) o.profile = true; }
             else { o.url = i.url; if (i.icon) o.icon = i.icon; if (i.kw) o.kw = i.kw; if (i.browser) o.browser = i.browser; }
             return o;
         })
@@ -1365,7 +1386,7 @@ function importCategories(text, moveSorted, apply) {
         if (has(n)) sum.mergedCats++; else sum.newCats++;
         catRef.set(key, apply ? ensureCat(n) : (state.categories.find((c) => c.name.toLowerCase() === key) || { id: "preview:" + key, name: n }));
     });
-    const apps = new Map(state.items.filter((i) => i.type === "app").map((i) => [i.pkg, i]));
+    const apps = new Map(state.items.filter((i) => i.type === "app").map((i) => [(i.user ? "p:" : "") + i.pkg, i]));
     const links = new Map(state.items.filter((i) => i.type === "link").map((i) => [urlKey(i.url), i]));
     const place = (dev, cat) => {
         if (dev.catId === cat.id) { sum.unchanged++; return; }
@@ -1377,7 +1398,7 @@ function importCategories(text, moveSorted, apply) {
         const cat = catRef.get(e.cat.toLowerCase());
         const i = e.item;
         if (i.type === "app") {
-            const dev = apps.get(i.pkg);
+            const dev = apps.get((i.profile || i.user ? "p:" : "") + i.pkg);
             if (!dev) { sum.appsMissing++; continue; }          // not installed on this device: ignored
             place(dev, cat);
         } else if (i.type === "link") {
@@ -1624,7 +1645,7 @@ const SYSTEM_PROMPT =
     "(copy the key exactly as given). Example line: com.example.mail | Communication | email, inbox, messages, mail. " +
     "No headings, no explanations, no numbering, no markdown, no JSON.";
 
-function keyOf(i) { return i.type === "app" ? i.pkg : i.id; }
+function keyOf(i) { return i.type === "app" && !i.user ? i.pkg : i.id; }
 
 async function aiChunk(chunk) {
     const existing = state.categories.map((c) => c.name);
@@ -2612,7 +2633,7 @@ function renderDock(body) {
             img.src = iconSrc(item);
             img.onerror = () => { img.onerror = null; img.src = letterIcon(item.label); };
             const l = document.createElement("div");
-            l.textContent = item.label;
+            l.textContent = shownLabel(item);
             d.append(img, l);
             attachPress(d, () => launch(item), () => sheet(item.label, [
                 { label: "Replace…", run: () => dockPicker(slot) },

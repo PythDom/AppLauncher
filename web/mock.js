@@ -54,10 +54,11 @@
     }
 
     window.Android = {
-        listApps: () => JSON.stringify(apps),
-        listAppsAsync: (id) => setTimeout(() => window.__nativeResult(id, JSON.stringify(apps)), 1500),   // slow on purpose
+        listApps: () => JSON.stringify(apps.concat([{ label: "Secure Notes", package: "com.samsung.android.app.notes", user: 150 }, { label: "Gallery", package: "com.sec.android.gallery3d", user: 150 }])),
+        listAppsAsync: (id) => setTimeout(() => window.__nativeResult(id, JSON.stringify(apps.concat([{ label: "Secure Notes", package: "com.samsung.android.app.notes", user: 150 }, { label: "Gallery", package: "com.sec.android.gallery3d", user: 150 }]))), 1500),   // slow on purpose
         scanInfo: () => "query 12 ms, labels 3 ms (42 of 42 from cache)",
         launch: (p) => { console.log("launch", p); window.__lastLaunch = p; return true; },
+        launchUser: (p, u) => { window.__lastLaunch = p + "#u" + u; return true; },
         openUrl: (u) => { console.log("openUrl", u); window.__lastUrl = u; },
         appInfo: (p) => console.log("appInfo", p),
         profilesInfo: () => "This copy runs as: UserHandle{0}\nProfiles visible through the launcher service: 1\n  UserHandle{0} (this one): 42 launchable apps",
