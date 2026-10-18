@@ -769,6 +769,56 @@ public class MainActivity extends Activity {
             return sb.toString();
         }
 
+        /**
+         * Starts this launcher's own copy in another profile (the Secure Folder). Two Android routes are tried per profile:
+         * the launcher service, then the cross-profile service. Answers {ok} or {ok:false, error} via __nativeResult.
+         */
+        @JavascriptInterface
+        public void openLauncherInSecure(final int id) {
+            runOnUiThread(() -> {
+                StringBuilder errors = new StringBuilder();
+                boolean started = false;
+                ComponentName self = new ComponentName(getPackageName(), MainActivity.class.getName());
+                try {
+                    LauncherApps la = (LauncherApps) getSystemService(Context.LAUNCHER_APPS_SERVICE);
+                    UserManager um = (UserManager) getSystemService(Context.USER_SERVICE);
+                    int tried = 0;
+                    for (UserHandle h : allProfiles()) {
+                        if (started) break;
+                        if (h.equals(android.os.Process.myUserHandle()) || "work".equals(profileKind(h))) continue;
+                        tried++;
+                        String tag = "profile " + um.getSerialNumberForUser(h);
+                        try {
+                            la.startMainActivity(self, h, null, null);
+                            started = true;
+                        } catch (Exception e) {
+                            errors.append(tag).append(" via launcher service: ").append(e.getClass().getSimpleName()).append(" ").append(e.getMessage()).append("\n");
+                        }
+                        if (!started && android.os.Build.VERSION.SDK_INT >= 30) {
+                            try {
+                                android.content.pm.CrossProfileApps cp = (android.content.pm.CrossProfileApps) getSystemService(Context.CROSS_PROFILE_APPS_SERVICE);
+                                cp.startMainActivity(self, h);
+                                started = true;
+                            } catch (Exception e) {
+                                errors.append(tag).append(" via cross-profile service: ").append(e.getClass().getSimpleName()).append(" ").append(e.getMessage()).append("\n");
+                            }
+                        }
+                    }
+                    if (tried == 0) errors.append("No Secure Folder profile is visible to this app.\n");
+                } catch (Exception e) {
+                    errors.append(e).append("\n");
+                }
+                try {
+                    JSONObject o = new JSONObject();
+                    o.put("ok", started);
+                    if (!started) o.put("error", errors.toString().trim());
+                    nativeResult(id, o.toString());
+                } catch (Exception e) {
+                    nativeResult(id, "{\"ok\":" + started + "}");
+                }
+            });
+        }
+
         /** Installed browsers as [{label, package}]. */
         @JavascriptInterface
         public String browsers() {

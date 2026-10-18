@@ -914,6 +914,32 @@ function renderResults() {
 
 // -------------------------------------------------------- tap / long press ----
 
+// A shortcut with this address starts this launcher's own copy inside the Secure Folder.
+const SECURE_URL = "launcher://secure-folder";
+const SECURE_ICON = "data:image/svg+xml;utf8," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96"><rect width="96" height="96" rx="22" fill="#1a73e8"/><rect x="26" y="44" width="44" height="34" rx="6" fill="#fff"/><path d="M34 44v-9a14 14 0 0 1 28 0v9" fill="none" stroke="#fff" stroke-width="7"/></svg>');
+
+function openSecureLauncher() {
+    if (typeof A.openLauncherInSecure !== "function") { toast("Not available in this version"); return; }
+    nativeDirect("openLauncherInSecure").then((r) => {
+        if (r && r.ok) return;
+        sheet("The launcher could not be started in the Secure Folder.\n" + ((r && r.error) || "") +
+            "\n\nCheck that AppLauncher is installed inside the Secure Folder. You can open the Secure Folder itself instead.", [
+            { label: "Open the Secure Folder app", run: () => {
+                let ok = false;
+                try { ok = A.launch("com.samsung.knox.securefolder"); } catch (e) { /* ignore */ }
+                if (!ok) toast("Secure Folder app not found");
+            } }
+        ]);
+    });
+}
+
+function addSecureShortcut() {
+    if (state.items.some((i) => i.type === "link" && i.url === SECURE_URL)) { toast("That shortcut already exists"); return; }
+    state.items.push({ id: "s:" + uid(), type: "link", label: "Secure Folder launcher", url: SECURE_URL, icon: SECURE_ICON, catId: null, page: 0 });
+    commit();
+    toast("Added “Secure Folder launcher” — move it to a category or the favourites bar");
+}
+
 function launch(item) {
     state.launches = state.launches || {};
     state.launches[item.id] = (state.launches[item.id] || 0) + 1;
@@ -922,6 +948,8 @@ function launch(item) {
         let ok = false;
         try { ok = item.user && typeof A.launchUser === "function" ? A.launchUser(item.pkg, item.user) : A.launch(item.pkg); } catch (e) { /* ignore */ }
         if (!ok) toast("Could not open " + item.label);
+    } else if (item.url === SECURE_URL) {
+        openSecureLauncher();
     } else {
         try {
             if (item.browser && typeof A.openUrlIn === "function") A.openUrlIn(item.url, item.browser);
@@ -1290,6 +1318,7 @@ function mainMenu() {
         { label: state.mainView === "cloud" ? "Show categories as cards" : "Show categories as a word cloud", run: () => { state.mainView = state.mainView === "cloud" ? "cards" : "cloud"; mainSel = null; commit(); } },
         { label: state.startPage === "main" ? "Home button opens: categories → switch to dashboard" : "Home button opens: dashboard → switch to categories",
             run: () => { state.startPage = state.startPage === "main" ? "dash" : "main"; save(); toast("Home now opens the " + (state.startPage === "main" ? "categories" : "dashboard")); } },
+        { label: "Open the launcher in Secure Folder", run: openSecureLauncher },
         { label: "Import old Launcher shortcuts", run: () => importLegacy(false) },
         { label: "Rescan installed apps", run: () => { const r = reconcile(); commit(); toast(r.added + " new, " + r.removed + " removed"); } },
         { label: "Settings & backup…", run: settingsMenu }
@@ -1306,6 +1335,7 @@ function settingsMenu() {
         } },
         { label: state.noProfiles ? "Show apps from other profiles (work / Secure Folder)" : "Hide apps from other profiles (work / Secure Folder)",
             run: () => { state.noProfiles = !state.noProfiles; const r = reconcile(); commit(); toast(state.noProfiles ? "Other profiles hidden" : "Rescanning…"); if (!state.noProfiles) scanAndReconcile(() => commit()); } },
+        { label: "Add a “Secure Folder launcher” shortcut", run: addSecureShortcut },
         { label: "Check Secure Folder / work profile access…", run: () => resultCard("Profiles this app can see",
             "If only one profile is listed, Android does not let this launcher list or open apps from the Secure Folder.",
             typeof A.profilesInfo === "function" ? A.profilesInfo() : "Not available in this version.") },
