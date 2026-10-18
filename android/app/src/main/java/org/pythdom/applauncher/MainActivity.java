@@ -777,6 +777,8 @@ public class MainActivity extends Activity {
         public void openLauncherInSecure(final int id) {
             runOnUiThread(() -> {
                 StringBuilder errors = new StringBuilder();
+                StringBuilder info = new StringBuilder();
+                String via = "";
                 boolean started = false;
                 ComponentName self = new ComponentName(getPackageName(), MainActivity.class.getName());
                 try {
@@ -789,8 +791,16 @@ public class MainActivity extends Activity {
                         tried++;
                         String tag = "profile " + um.getSerialNumberForUser(h);
                         try {
+                            info.append(tag).append(": package enabled there = ").append(la.isPackageEnabled(getPackageName(), h))
+                                    .append(", launcher activity enabled = ").append(la.isActivityEnabled(self, h))
+                                    .append(", user unlocked = ").append(um.isUserUnlocked(h)).append("\n");
+                        } catch (Exception e) {
+                            info.append(tag).append(": facts unavailable (").append(e.getClass().getSimpleName()).append(")\n");
+                        }
+                        try {
                             la.startMainActivity(self, h, null, null);
                             started = true;
+                            via = "launcher service";
                         } catch (Exception e) {
                             errors.append(tag).append(" via launcher service: ").append(e.getClass().getSimpleName()).append(" ").append(e.getMessage()).append("\n");
                         }
@@ -799,6 +809,7 @@ public class MainActivity extends Activity {
                                 android.content.pm.CrossProfileApps cp = (android.content.pm.CrossProfileApps) getSystemService(Context.CROSS_PROFILE_APPS_SERVICE);
                                 cp.startMainActivity(self, h);
                                 started = true;
+                                via = "cross-profile service";
                             } catch (Exception e) {
                                 errors.append(tag).append(" via cross-profile service: ").append(e.getClass().getSimpleName()).append(" ").append(e.getMessage()).append("\n");
                             }
@@ -811,6 +822,8 @@ public class MainActivity extends Activity {
                 try {
                     JSONObject o = new JSONObject();
                     o.put("ok", started);
+                    o.put("via", via);
+                    o.put("info", info.toString().trim());
                     if (!started) o.put("error", errors.toString().trim());
                     nativeResult(id, o.toString());
                 } catch (Exception e) {

@@ -920,9 +920,17 @@ const SECURE_ICON = "data:image/svg+xml;utf8," + encodeURIComponent('<svg xmlns=
 
 function openSecureLauncher() {
     if (typeof A.openLauncherInSecure !== "function") { toast("Not available in this version"); return; }
+    toast("Asking Android to start the Secure Folder launcher…", 2500);
     nativeDirect("openLauncherInSecure").then((r) => {
-        if (r && r.ok) return;
-        sheet("The launcher could not be started in the Secure Folder.\n" + ((r && r.error) || "") +
+        const facts = (r && r.info) ? "\n\n" + r.info : "";
+        if (r && r.ok) {      // accepted: if nothing appears, the Secure Folder is probably locked or the app is not installed there
+            setTimeout(() => { if (document.visibilityState === "visible") sheet("Android accepted the request (via the " + (r.via || "system") + ") but the Secure Folder launcher did not come to the front.\n" +
+                "Unlock the Secure Folder first, and check AppLauncher is installed inside it." + facts, [
+                { label: "Open the Secure Folder app", run: () => { try { A.launch("com.samsung.knox.securefolder"); } catch (e) { toast("Secure Folder app not found"); } } }
+            ]); }, 1500);
+            return;
+        }
+        sheet("The launcher could not be started in the Secure Folder.\n" + ((r && r.error) || "") + facts +
             "\n\nCheck that AppLauncher is installed inside the Secure Folder. You can open the Secure Folder itself instead.", [
             { label: "Open the Secure Folder app", run: () => {
                 let ok = false;
