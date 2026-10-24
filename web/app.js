@@ -1367,6 +1367,10 @@ function settingsMenu() {
             try { A.copyText(JSON.stringify(categoriesExport())); toast("Categories copied — paste them on the other device"); } catch (e) { toast("Copy failed"); }
         } },
         { label: "Import categories from paste…", run: importCategoriesForm },
+        { label: "Copy favourites bar & settings (for another device)", run: () => {
+            try { A.copyText(JSON.stringify(configExport())); toast("Favourites and settings copied — paste them on the other device"); } catch (e) { toast("Copy failed"); }
+        } },
+        { label: "Import favourites bar & settings from paste…", run: importConfigForm },
         { label: "Restore everything from pasted backup…", run: restoreForm },
         { label: "Reset all organisation", danger: true, run: () => confirmSheet("Delete all categories, shortcuts and settings and start over?", "Reset", () => {
             const ai = state.ai;
@@ -1501,6 +1505,169 @@ function importCategoriesForm() {
     }, [{ label: "Preview", run: (v, say) => {
         try { say(importSummary(importCategories(v.text, v.moveSorted, false))); }
         catch (e) { say("That doesn't look like a category export or backup."); }
+    } }]);
+}
+
+// ---------------------------------- favourites bar + dashboard/display settings: copy to / import from another device ----
+
+const SETTING_KEYS = ["units", "startPage", "mainView", "cloudMaxN", "cloudSize", "cloudMin", "autoMerge", "noProfiles"];
+
+function itemDescriptor(id) {
+    const i = itemById(id);
+    if (!i) return null;
+    if (i.type === "app") return i.user ? { t: "app", pkg: i.pkg, profile: true, label: i.label } : { t: "app", pkg: i.pkg, label: i.label };
+    const o = { t: "link", url: i.url, label: i.label };
+    if (i.icon) o.icon = i.icon;
+    if (i.kw) o.kw = i.kw;
+    if (i.browser) o.browser = i.browser;
+    return o;
+}
+
+function configExport() {
+    const settings = {};
+    SETTING_KEYS.forEach((k) => { if (state[k] !== undefined) settings[k] = state[k]; });
+    if (Array.isArray(state.zones)) settings.zones = state.zones;
+    if (state.weatherLoc) settings.weatherLoc = state.weatherLoc;
+    if ((state.icsFeeds || []).length) settings.icsFeeds = state.icsFeeds.map((f) => ({ name: f.name, url: f.url }));
+    return {
+        v: 1, kind: "favourites-settings",
+        dock: dockEntries().map((e) => {
+            if (isFolder(e)) return { folder: e.name, items: e.ids.map(itemDescriptor).filter(Boolean) };
+            return typeof e === "string" ? itemDescriptor(e) : null;
+        }),
+        settings
+    };
+}
+
+// Plans (apply=false) or performs (apply=true) the import. Apps are matched by package (missing ones are ignored),
+// shortcuts by address (created, unsorted, when missing). The pasted bar replaces the current one.
+function importConfig(text, opts, apply) {
+    const p = JSON.parse(String(text).trim());
+    if (!p || p.kind !== "favourites-settings" || !Array.isArray(p.dock)) throw new Error("not a favourites export");
+    const sum = { slots: 0, folders: 0, placed: 0, ignored: 0, created: 0, bad: 0, settings: [] };
+    const apps = new Map(state.items.filter((i) => i.type === "app").map((i) => [(i.user ? "p:" : "") + i.pkg, i]));
+    const links = new Map(state.items.filter((i) => i.type === "link").map((i) => [urlKey(i.url), i]));
+    const resolve = (d) => {
+        if (!d || typeof d !== "object") return null;
+        if (d.t === "app") {
+            const dev = apps.get((d.profile ? "p:" : "") + d.pkg);
+            if (!dev) { sum.ignored++; return null; }
+            return dev.id;
+        }
+        if (d.t === "link") {
+            const url = normUrl(d.url);
+            if (!url || !safeUrl(url)) { sum.bad++; return null; }
+            const dev = links.get(urlKey(url));
+            if (dev) return dev.id;
+            sum.created++;
+            const n = { id: "s:" + uid(), type: "link", label: String(d.label || url).slice(0, 60), url, catId: null, page: 0 };
+            const ic = safeIcon(d.icon);
+            if (ic) n.icon = ic;
+            if (typeof d.kw === "string" && d.kw) n.kw = d.kw.slice(0, 200);
+            if (typeof d.browser === "string" && /^[\w.]{1,100}$/.test(d.browser)) n.browser = d.browser;
+            if (apply) state.items.push(n);
+            links.set(urlKey(url), n);
+            return n.id;
+        }
+        return null;
+    };
+    if (opts.dock) {
+        const used = new Set();
+        const dock = p.dock.slice(0, DOCK_N).map((e) => {
+            let out = null;
+            if (e && e.folder !== undefined && Array.isArray(e.items)) {
+                const ids = [];
+                e.items.slice(0, FOLDER_MAX).forEach((d) => { const id = resolve(d); if (id && !used.has(id)) { used.add(id); ids.push(id); sum.placed++; } });
+                if (ids.length) { out = { name: normName(e.folder) || "Folder", ids }; sum.folders++; }
+            } else {
+                const id = resolve(e);
+                if (id && !used.has(id)) { used.add(id); out = id; sum.placed++; }
+            }
+            if (out) sum.slots++;
+            return out;
+        });
+        while (dock.length < DOCK_N) dock.push(null);
+        if (apply) state.dock = dock;
+    }
+    if (opts.settings && p.settings && typeof p.settings === "object") {
+        const st = p.settings, apply1 = (name, fn) => { try { if (fn()) sum.settings.push(name); } catch (e) { /* skip */ } };
+        apply1("temperature units", () => { if (["metric", "imperial"].includes(st.units)) { if (apply) state.units = st.units; return true; } });
+        apply1("start screen", () => { if (["dash", "main"].includes(st.startPage)) { if (apply) state.startPage = st.startPage; return true; } });
+        apply1("categories view", () => { if (["cards", "cloud"].includes(st.mainView)) { if (apply) state.mainView = st.mainView; return true; } });
+        apply1("keyword cloud options", () => {
+            let any = false;
+            if (Number.isFinite(st.cloudMaxN) && st.cloudMaxN >= 0 && st.cloudMaxN <= 200) { if (apply) state.cloudMaxN = st.cloudMaxN; any = true; }
+            if (["use", "count"].includes(st.cloudSize)) { if (apply) state.cloudSize = st.cloudSize; any = true; }
+            if (Number.isFinite(st.cloudMin) && st.cloudMin >= 1 && st.cloudMin <= 20) { if (apply) state.cloudMin = st.cloudMin; any = true; }
+            if (typeof st.autoMerge === "boolean") { if (apply) state.autoMerge = st.autoMerge; any = true; }
+            return any;
+        });
+        apply1("other-profile apps switch", () => { if (typeof st.noProfiles === "boolean") { if (apply) state.noProfiles = st.noProfiles; return true; } });
+        apply1("time zones", () => {
+            if (!Array.isArray(st.zones) || st.zones.length !== 5) return false;
+            const z = st.zones.map((x) => ({ label: normName(x && x.label), tz: String(x && x.tz) }));
+            z.forEach((x) => { if (!x.label) throw new Error("label"); new Intl.DateTimeFormat("en-US", { timeZone: x.tz }); });
+            if (apply) state.zones = z;
+            return true;
+        });
+        apply1("weather city", () => {
+            const w = st.weatherLoc;
+            if (!w || !Number.isFinite(w.lat) || !Number.isFinite(w.lon) || Math.abs(w.lat) > 90 || Math.abs(w.lon) > 180) return false;
+            if (apply) { state.weatherLoc = { lat: w.lat, lon: w.lon, place: normName(w.place) }; state.wx = null; }
+            return true;
+        });
+        apply1("calendar links", () => {
+            if (!Array.isArray(st.icsFeeds)) return false;
+            const have = new Set((state.icsFeeds || []).map((f) => urlKey(f.url)));
+            let n = 0;
+            st.icsFeeds.slice(0, 10).forEach((f) => {
+                const url = String((f && f.url) || "").trim();
+                if (!/^(https?|webcal):\/\//i.test(url) || have.has(urlKey(url))) return;
+                have.add(urlKey(url));
+                n++;
+                if (apply) {
+                    state.icsFeeds = state.icsFeeds || [];
+                    const colors = ["#0b84ff", "#34a853", "#f9ab00", "#d93025", "#a142f4", "#00acc1"];
+                    state.icsFeeds.push({ id: "f" + uid(), name: normName(f.name) || "Calendar link", url, color: colors[state.icsFeeds.length % colors.length] });
+                }
+            });
+            return n > 0;
+        });
+    }
+    return sum;
+}
+
+function configSummary(m, opts) {
+    const lines = [];
+    if (opts.dock) {
+        lines.push("Favourites bar: " + m.slots + " slot" + (m.slots === 1 ? "" : "s") + " filled (" + m.folders + " folder" + (m.folders === 1 ? "" : "s") + "), " + m.placed + " item" + (m.placed === 1 ? "" : "s") + " placed");
+        if (m.created) lines.push(m.created + " web shortcut" + (m.created === 1 ? "" : "s") + " created (unsorted)");
+        if (m.ignored) lines.push(m.ignored + " app" + (m.ignored === 1 ? "" : "s") + " not installed here, ignored");
+        if (m.bad) lines.push(m.bad + " shortcut" + (m.bad === 1 ? "" : "s") + " skipped (unusable address)");
+    }
+    if (opts.settings) lines.push(m.settings.length ? "Settings: " + m.settings.join(", ") : "Settings: nothing to import");
+    return lines.join("\n");
+}
+
+function importConfigForm() {
+    form("Import favourites & settings", [
+        { id: "text", label: "Paste the text copied with “Copy favourites & settings…”", type: "textarea", rows: 7 },
+        { id: "dock", label: "Replace the favourites bar with the pasted one", type: "checkbox", value: true },
+        { id: "settings", label: "Import dashboard and display settings", type: "checkbox", value: true }
+    ], "Import", (v) => {
+        try {
+            const o = { dock: v.dock, settings: v.settings };
+            const m = importConfig(v.text, o, true);
+            commit();
+            if (v.settings) { try { refreshDash(true); } catch (e) { /* dashboard not ready */ } }
+            toast(configSummary(m, o).split("\n")[0], 6000);
+        } catch (e) {
+            toast("That doesn't look like a favourites export");
+            return false;
+        }
+    }, [{ label: "Preview", run: (v, say) => {
+        try { say(configSummary(importConfig(v.text, { dock: v.dock, settings: v.settings }, false), { dock: v.dock, settings: v.settings })); }
+        catch (e) { say("That doesn't look like a favourites export."); }
     } }]);
 }
 
@@ -2638,6 +2805,105 @@ function dockWithout(ids) {
 
 function saveDock(d) { state.dock = d; commit(); }
 
+// Press-and-hold lifts the item: moving the finger then drags it onto another target (cfg.sel marks the targets);
+// letting go without moving opens the menu; a quick tap runs cfg.tap.
+function attachDrag(el, cfg) {
+    let timer = null, armed = false, dragging = false, sx = 0, sy = 0, ghost = null, hover = null, swallow = false;
+    const cleanup = () => {
+        clearTimeout(timer); timer = null; armed = false; dragging = false;
+        el.classList.remove("lift");
+        if (ghost) { ghost.remove(); ghost = null; }
+        if (hover) { hover.classList.remove("droptarget"); hover = null; }
+    };
+    const overAt = (x, y) => {
+        const hit = document.elementsFromPoint(x, y).find((n) => n !== ghost && n.closest(cfg.sel));
+        return hit ? hit.closest(cfg.sel) : null;
+    };
+    el.addEventListener("pointerdown", (e) => {
+        if (e.button) return;
+        cleanup();
+        swallow = false;
+        sx = e.clientX; sy = e.clientY;
+        try { el.setPointerCapture(e.pointerId); } catch (x) { /* ignore */ }
+        timer = setTimeout(() => {
+            timer = null; armed = true;
+            if (navigator.vibrate) navigator.vibrate(15);
+            el.classList.add("lift");
+        }, 350);
+    });
+    el.addEventListener("pointermove", (e) => {
+        const far = Math.abs(e.clientX - sx) > 10 || Math.abs(e.clientY - sy) > 10;
+        if (timer && far) { clearTimeout(timer); timer = null; return; }     // an ordinary swipe, not a hold
+        if (!armed) return;
+        if (!dragging && far) {
+            dragging = true;
+            ghost = el.cloneNode(true);
+            ghost.classList.add("dragghost");
+            ghost.style.width = el.offsetWidth + "px";
+            document.body.appendChild(ghost);
+        }
+        if (dragging) {
+            ghost.style.left = (e.clientX - el.offsetWidth / 2) + "px";
+            ghost.style.top = (e.clientY - el.offsetHeight / 2) + "px";
+            let t = overAt(e.clientX, e.clientY);
+            if (t === el) t = null;
+            if (t !== hover) {
+                if (hover) hover.classList.remove("droptarget");
+                hover = t;
+                if (hover) hover.classList.add("droptarget");
+            }
+        }
+    });
+    el.addEventListener("touchmove", (e) => { if (armed) e.preventDefault(); }, { passive: false });   // no page scroll while dragging
+    el.addEventListener("pointerup", () => {
+        const wasDrag = dragging, wasArmed = armed, target = hover;
+        cleanup();
+        if (wasDrag) { swallow = true; if (target) cfg.drop(target); }
+        else if (wasArmed) { swallow = true; cfg.menu(); }
+    });
+    el.addEventListener("pointercancel", cleanup);
+    el.addEventListener("click", (e) => { if (swallow) { swallow = false; e.preventDefault(); return; } cfg.tap(); });
+    el.addEventListener("contextmenu", (e) => e.preventDefault());
+}
+
+// A slot of the bar: drag onto an empty slot to move, onto another to swap, a single app onto a folder to put it inside.
+function dockDrop(from, to) {
+    if (from === to) return;
+    const d = dockEntries();
+    const a = d[from], b = d[to];
+    if (typeof a === "string" && isFolder(b)) {
+        if (b.ids.length >= FOLDER_MAX) { toast("A folder holds up to " + FOLDER_MAX); return; }
+        d[to] = { name: b.name, ids: b.ids.concat(a) };
+        d[from] = null;
+    } else {
+        d[from] = b;
+        d[to] = a;
+    }
+    saveDock(d);
+}
+
+function dragSlot(el, slot, tap, menu) {
+    el.dataset.slot = slot;
+    attachDrag(el, { sel: ".dock [data-slot]", tap, menu, drop: (t) => dockDrop(slot, Number(t.dataset.slot)) });
+}
+
+// An item inside an open folder: drop it on another item to take that place.
+function dragFolderItem(el, slot, id, tap, menu) {
+    el.dataset.fid = id;
+    attachDrag(el, { sel: ".fgrid [data-fid]", tap, menu, drop: (t) => {
+        const e = dockEntries()[slot];
+        if (!isFolder(e)) return;
+        const ids = e.ids.slice();
+        const from = ids.indexOf(id), to = ids.indexOf(t.dataset.fid);
+        if (from < 0 || to < 0 || from === to) return;
+        ids.splice(to, 0, ids.splice(from, 1)[0]);
+        const d = dockEntries();
+        d[slot] = { name: e.name, ids };
+        saveDock(d);
+        openFolder(slot);
+    } });
+}
+
 function itemIcon(item) {
     const img = document.createElement("img");
     img.src = iconSrc(item);
@@ -2751,7 +3017,7 @@ function openFolder(slot) {
         const l = document.createElement("div");
         l.textContent = shownLabel(item);
         d.append(itemIcon(item), l);
-        attachPress(d, () => { closeOverlay(); launch(item); }, () => sheet(item.label, [
+        dragFolderItem(d, slot, item.id, () => { closeOverlay(); launch(item); }, () => sheet(item.label, [
             { label: "Remove from the folder", run: () => {
                 const dd = dockEntries();
                 dd[slot] = { name: e.name, ids: e.ids.filter((x) => x !== item.id) };
@@ -2794,7 +3060,7 @@ function renderDock(body) {
             const l = document.createElement("div");
             l.textContent = e.name;
             d.append(box, l);
-            attachPress(d, () => openFolder(slot), () => sheet(e.name, [
+            dragSlot(d, slot, () => openFolder(slot), () => sheet(e.name, [
                 { label: "Add apps or shortcuts…", run: () => addToFolder(slot) },
                 { label: "Rename…", run: () => renameFolder(slot, false) },
                 { label: "Remove the folder (items stay in the launcher)", danger: true, run: () => { const dd = dockEntries(); dd[slot] = null; saveDock(dd); } }
@@ -2804,13 +3070,14 @@ function renderDock(body) {
             const l = document.createElement("div");
             l.textContent = shownLabel(item);
             d.append(itemIcon(item), l);
-            attachPress(d, () => launch(item), () => sheet(item.label, [
+            dragSlot(d, slot, () => launch(item), () => sheet(item.label, [
                 { label: "Replace…", run: () => pickForSlot(slot) },
                 { label: "Make a folder with this…", run: () => newFolder(slot, item.id) },
                 { label: "Remove from the bar", run: () => { const dd = dockEntries(); dd[slot] = null; saveDock(dd); } }
             ]));
         } else {
             d.className = "dslot empty";
+            d.dataset.slot = slot;
             d.textContent = "+";
             d.onclick = () => sheet("Favourites slot " + (slot + 1), [
                 { label: "Add an app or shortcut…", run: () => pickForSlot(slot) },

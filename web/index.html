@@ -117,6 +117,10 @@ header button { width: 40px; height: 40px; font-size: 20px; border-radius: 50%; 
 .fgrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px 6px; padding: 8px 0 2px; }
 .fgrid .dslot div { font-size: 11px; }
 .dockopt .tick { margin-left: auto; color: var(--accent); font-weight: 700; }
+.dslot.lift { opacity: .35; }
+.droptarget { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 12px; background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.dragghost { position: fixed !important; z-index: 60; pointer-events: none; opacity: .92; transform: scale(1.12); background: var(--card);
+             box-shadow: 0 6px 18px rgba(0,0,0,.35); border-radius: 14px; margin: 0 !important; }
 .dockopt { display: flex; align-items: center; gap: 12px; }
 .dockopt img { width: 34px; height: 34px; border-radius: 8px; object-fit: contain; background: var(--tile); }
 .agd { font-size: 12px; font-weight: 700; color: var(--accent); padding: 8px 2px 3px; text-transform: uppercase; letter-spacing: .4px; }
