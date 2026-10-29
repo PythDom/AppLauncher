@@ -183,9 +183,11 @@ function attachPress(el, tap, long) {
 
 // -------------------------------------------------------------- rendering ----
 
-function tile(item) {
+// drag (optional): { sel } — selector of the things an item can be dropped on. Without it the tile only taps / long-presses.
+function tile(item, drag) {
     const t = document.createElement("div");
     t.className = "tile" + (selected.has(item.id) ? " sel" : "");
+    t.dataset.iid = item.id;
     const img = document.createElement("img");
     img.loading = "lazy";
     img.src = iconSrc(item);
@@ -194,13 +196,41 @@ function tile(item) {
     l.className = "lbl";
     l.textContent = shownLabel(item);
     t.append(img, l);
-    attachPress(t, () => onTap(item), () => onLong(item));
+    if (drag) attachDrag(t, { sel: drag.sel, scroll: true, tap: () => onTap(item), menu: () => onLong(item), noDrag: () => selectMode, drop: (target) => dropItem(item, target) });
+    else attachPress(t, () => onTap(item), () => onLong(item));
     return t;
+}
+
+const groupOf = (i) => (catOf(i) ? i.catId : UNSORTED);
+const DRAG_CARDS = { sel: ".tile[data-iid], .group[data-gid]" };   // drop on a tile = take its place; on a card = move there
+const DRAG_OPEN = { sel: ".tile[data-iid]" };                      // inside one open category: reorder only
+
+// Puts item next to target in the global order, which is also the order inside a category.
+function placeNear(item, target, before) {
+    const from = state.items.indexOf(item), to = state.items.indexOf(target);
+    if (from < 0 || to < 0 || item === target) return;
+    state.items.splice(from, 1);
+    const at = state.items.indexOf(target);
+    state.items.splice(!before && from < to ? at + 1 : at, 0, item);
+}
+
+function dropItem(item, targetEl) {
+    const targetItem = targetEl.dataset.iid ? itemById(targetEl.dataset.iid) : null;
+    const gid = targetItem ? groupOf(targetItem) : targetEl.dataset.gid;
+    if (!gid) return;
+    const changed = gid !== groupOf(item);
+    if (changed) {
+        item.catId = gid === UNSORTED ? null : gid;
+        if (!targetItem) { state.items.splice(state.items.indexOf(item), 1); state.items.push(item); }   // dropped on the card: goes last
+    }
+    if (targetItem) placeNear(item, targetItem, changed);   // into another card: in front of the tile it was dropped on
+    commit();
 }
 
 function groupBlock(title, items, opts) {
     const g = document.createElement("div");
     g.className = "group";
+    if (opts.gid) g.dataset.gid = opts.gid;
     const h = document.createElement("div");
     h.className = "ghead" + (opts.unsorted ? " unsorted" : "");
     const chev = document.createElement("span");
@@ -225,7 +255,7 @@ function groupBlock(title, items, opts) {
             g.appendChild(e);
         }
     } else {
-        items.forEach((i) => grid.appendChild(tile(i)));
+        items.forEach((i) => grid.appendChild(tile(i, opts.drag)));
     }
     g.appendChild(grid);
     return g;
@@ -240,7 +270,7 @@ function setAllCollapsed(c) {
 
 // Categories as a word cloud instead of cards: tap a name to open it (state.mainView = "cloud").
 let mainSel = null;   // "__un" or a category id while one category is open in the cloud view
-const UNSORTED = "__un";
+var UNSORTED = "__un";
 
 function renderCategoryCloud(el, items) {
     if (mainSel && mainSel !== UNSORTED && !catById(mainSel)) mainSel = null;
@@ -271,13 +301,13 @@ function renderCategoryCloud(el, items) {
         } else {
             const grid = document.createElement("div");
             grid.className = "grid";
-            list.forEach((i) => grid.appendChild(tile(i)));
+            list.forEach((i) => grid.appendChild(tile(i, DRAG_OPEN)));
             card.appendChild(grid);
         }
         el.appendChild(card);
         return;
     }
-    const entries = state.categories.map((c) => ({ id: c.id, label: c.name, items: items.filter((i) => i.catId === c.id), cat: c }));
+    const entries = orderedCategories().map((c) => ({ id: c.id, label: c.name, items: items.filter((i) => i.catId === c.id), cat: c }));
     const un = items.filter((i) => !catOf(i));
     if (un.length) entries.push({ id: UNSORTED, label: "Unsorted", items: un, cat: null });
     if (!entries.length) {
@@ -298,14 +328,28 @@ function renderCategoryCloud(el, items) {
     entries.forEach((x, n) => {
         const b = document.createElement("button");
         b.className = "kw";
-        b.textContent = x.label + (x.items.length ? "" : " (empty)");
-        b.style.fontSize = Math.round(17 + 22 * fracs[n]) + "px";
+        const size = Math.round(17 + 22 * fracs[n]);
+        const rep = x.items.slice().sort((p, q) => usageScore(q) - usageScore(p))[0];     // the most used app stands for the category
+        if (rep) {
+            b.classList.add("withicon");
+            const ic = itemIcon(rep);
+            ic.className = "kwicon";
+            ic.style.width = ic.style.height = Math.round(size * 1.2) + "px";
+            b.appendChild(ic);
+        }
+        b.appendChild(document.createTextNode(x.label + (x.items.length ? "" : " (empty)")));
+        b.style.fontSize = size + "px";
         b.style.color = x.cat ? "hsl(" + hueOf(x.label) + ",62%,52%)" : "var(--muted)";
         attachPress(b, () => { mainSel = x.id; renderMain(el); el.scrollTop = 0; },
             () => (x.cat ? categorySheet(x.cat) : unsortedSheet(x.items)));
         cloud.appendChild(b);
     });
     el.appendChild(cloud);
+}
+
+// Cards and words follow the categories' own order, or alphabetical order when state.catSort is "az" (a view only).
+function orderedCategories() {
+    return state.catSort === "az" ? state.categories.slice().sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" })) : state.categories;
 }
 
 function renderMain(el) {
@@ -323,13 +367,15 @@ function renderMain(el) {
             return b;
         };
         if (!cloudView) bar.append(mk("▸ Collapse all", () => setAllCollapsed(true)), mk("▾ Expand all", () => setAllCollapsed(false)));
+        bar.append(mk(state.catSort === "az" ? "↕ My order" : "↕ A–Z", () => { state.catSort = state.catSort === "az" ? "manual" : "az"; commit(); }));
         bar.append(mk(cloudView ? "▦ Cards" : "☁ Word cloud", () => { state.mainView = cloudView ? "cards" : "cloud"; mainSel = null; commit(); }));
         if (!(cloudView && mainSel)) el.appendChild(bar);
     }
     if (cloudView) { renderCategoryCloud(el, items); return; }
-    for (const c of state.categories) {
+    for (const c of orderedCategories()) {
         any = true;
         el.appendChild(groupBlock(c.name, items.filter((i) => i.catId === c.id), {
+            gid: c.id, drag: DRAG_CARDS,
             collapsed: !!c.collapsed,
             toggle: () => { c.collapsed = !c.collapsed; commit(); },
             long: () => categorySheet(c)
@@ -339,6 +385,7 @@ function renderMain(el) {
     if (un.length) {
         any = true;
         el.appendChild(groupBlock("Unsorted", un, {
+            gid: UNSORTED, drag: DRAG_CARDS,
             unsorted: true,
             collapsed: !!state.unsortedCollapsed,
             toggle: () => { state.unsortedCollapsed = !state.unsortedCollapsed; commit(); },
@@ -1510,7 +1557,7 @@ function importCategoriesForm() {
 
 // ---------------------------------- favourites bar + dashboard/display settings: copy to / import from another device ----
 
-const SETTING_KEYS = ["units", "startPage", "mainView", "cloudMaxN", "cloudSize", "cloudMin", "autoMerge", "noProfiles"];
+const SETTING_KEYS = ["units", "startPage", "mainView", "catSort", "cloudMaxN", "cloudSize", "cloudMin", "autoMerge", "noProfiles"];
 
 function itemDescriptor(id) {
     const i = itemById(id);
@@ -1593,7 +1640,12 @@ function importConfig(text, opts, apply) {
         const st = p.settings, apply1 = (name, fn) => { try { if (fn()) sum.settings.push(name); } catch (e) { /* skip */ } };
         apply1("temperature units", () => { if (["metric", "imperial"].includes(st.units)) { if (apply) state.units = st.units; return true; } });
         apply1("start screen", () => { if (["dash", "main"].includes(st.startPage)) { if (apply) state.startPage = st.startPage; return true; } });
-        apply1("categories view", () => { if (["cards", "cloud"].includes(st.mainView)) { if (apply) state.mainView = st.mainView; return true; } });
+        apply1("categories view", () => {
+            let any = false;
+            if (["cards", "cloud"].includes(st.mainView)) { if (apply) state.mainView = st.mainView; any = true; }
+            if (["az", "manual"].includes(st.catSort)) { if (apply) state.catSort = st.catSort; any = true; }
+            return any;
+        });
         apply1("keyword cloud options", () => {
             let any = false;
             if (Number.isFinite(st.cloudMaxN) && st.cloudMaxN >= 0 && st.cloudMaxN <= 200) { if (apply) state.cloudMaxN = st.cloudMaxN; any = true; }
@@ -2808,9 +2860,10 @@ function saveDock(d) { state.dock = d; commit(); }
 // Press-and-hold lifts the item: moving the finger then drags it onto another target (cfg.sel marks the targets);
 // letting go without moving opens the menu; a quick tap runs cfg.tap.
 function attachDrag(el, cfg) {
-    let timer = null, armed = false, dragging = false, sx = 0, sy = 0, ghost = null, hover = null, swallow = false;
+    let timer = null, armed = false, dragging = false, sx = 0, sy = 0, lx = 0, ly = 0, ghost = null, hover = null, swallow = false, scrollTimer = null;
     const cleanup = () => {
         clearTimeout(timer); timer = null; armed = false; dragging = false;
+        clearInterval(scrollTimer); scrollTimer = null;
         el.classList.remove("lift");
         if (ghost) { ghost.remove(); ghost = null; }
         if (hover) { hover.classList.remove("droptarget"); hover = null; }
@@ -2819,20 +2872,32 @@ function attachDrag(el, cfg) {
         const hit = document.elementsFromPoint(x, y).find((n) => n !== ghost && n.closest(cfg.sel));
         return hit ? hit.closest(cfg.sel) : null;
     };
+    const updateHover = () => {
+        let t = overAt(lx, ly);
+        if (t === el) t = null;
+        if (t !== hover) {
+            if (hover) hover.classList.remove("droptarget");
+            hover = t;
+            if (hover) hover.classList.add("droptarget");
+        }
+    };
     el.addEventListener("pointerdown", (e) => {
         if (e.button) return;
         cleanup();
         swallow = false;
-        sx = e.clientX; sy = e.clientY;
+        sx = lx = e.clientX; sy = ly = e.clientY;
         try { el.setPointerCapture(e.pointerId); } catch (x) { /* ignore */ }
         timer = setTimeout(() => {
-            timer = null; armed = true;
+            timer = null;
             if (navigator.vibrate) navigator.vibrate(15);
+            if (cfg.noDrag && cfg.noDrag()) { swallow = true; cfg.menu(); return; }   // e.g. while selecting: a hold is just a hold
+            armed = true;
             el.classList.add("lift");
         }, 350);
     });
     el.addEventListener("pointermove", (e) => {
-        const far = Math.abs(e.clientX - sx) > 10 || Math.abs(e.clientY - sy) > 10;
+        lx = e.clientX; ly = e.clientY;
+        const far = Math.abs(lx - sx) > 10 || Math.abs(ly - sy) > 10;
         if (timer && far) { clearTimeout(timer); timer = null; return; }     // an ordinary swipe, not a hold
         if (!armed) return;
         if (!dragging && far) {
@@ -2841,17 +2906,21 @@ function attachDrag(el, cfg) {
             ghost.classList.add("dragghost");
             ghost.style.width = el.offsetWidth + "px";
             document.body.appendChild(ghost);
+            const scroller = cfg.scroll ? el.closest(".page") : null;
+            if (scroller) {                                                     // dragging near the top/bottom edge scrolls the page
+                scrollTimer = setInterval(() => {
+                    const r = scroller.getBoundingClientRect();
+                    if (ly < r.top + 70) scroller.scrollTop -= 14;
+                    else if (ly > r.bottom - 70) scroller.scrollTop += 14;
+                    else return;
+                    updateHover();
+                }, 16);
+            }
         }
         if (dragging) {
-            ghost.style.left = (e.clientX - el.offsetWidth / 2) + "px";
-            ghost.style.top = (e.clientY - el.offsetHeight / 2) + "px";
-            let t = overAt(e.clientX, e.clientY);
-            if (t === el) t = null;
-            if (t !== hover) {
-                if (hover) hover.classList.remove("droptarget");
-                hover = t;
-                if (hover) hover.classList.add("droptarget");
-            }
+            ghost.style.left = (lx - el.offsetWidth / 2) + "px";
+            ghost.style.top = (ly - el.offsetHeight / 2) + "px";
+            updateHover();
         }
     });
     el.addEventListener("touchmove", (e) => { if (armed) e.preventDefault(); }, { passive: false });   // no page scroll while dragging

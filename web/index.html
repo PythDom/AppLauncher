@@ -56,6 +56,10 @@ header button { width: 40px; height: 40px; font-size: 20px; border-radius: 50%; 
 .cloud { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 4px 6px; padding: 14px 4px 24px; }
 .kw { border: 0; background: transparent; padding: 3px 7px; border-radius: 12px; font-family: Arial, Helvetica, sans-serif;
       font-weight: 700; line-height: 1.15; cursor: pointer; }
+.kw.withicon { display: inline-flex; align-items: center; gap: 6px; }
+.kwicon { flex: none; border-radius: 22%; object-fit: contain; background: var(--tile); pointer-events: none; }
+.tile.lift { opacity: .35; }
+.cardbar { flex-wrap: wrap; }
 .kw:active { background: var(--line); }
 .pinrow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 10px 4px 2px; }
 .pinrow .lab { font-size: 12px; color: var(--muted); margin-right: 4px; }
